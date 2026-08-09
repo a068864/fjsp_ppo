@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+.worktrees/
+
+# Secrets / local overrides
+.env
+.env.*
+!.env.example
+credentials.json
+*.pem
+
+# Local inspect / vendor copies
+.sb3_inspect/
+
+# Training artifacts
+logs/**
+!logs/.gitkeep
+checkpoints/**
+!checkpoints/.gitkeep
+*.zip
+
+# Brainstorm / superpowers session artifacts
+.superpowers/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

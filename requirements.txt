@@ -1,0 +1,34 @@
+# FJSP PPO dependencies
+# Supported Python: 3.10–3.13
+#
+# Install PyTorch first for your platform/CUDA, then the rest.
+# Example (CUDA 12.6, Torch 2.10):
+#   pip install torch==2.10.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+# Example (CPU):
+#   pip install torch==2.10.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+#
+# Then PyG wheels (match torch + CUDA tags), e.g.:
+#   pip install torch-geometric>=2.7.0
+#   pip install pyg_lib torch_scatter torch_sparse -f https://data.pyg.org/whl/torch-2.10.0+cu126.html
+# Or for CPU:
+#   pip install pyg_lib torch_scatter torch_sparse -f https://data.pyg.org/whl/torch-2.10.0+cpu.html
+
+# torch>=2.10 for current security/compat matrix (SB3 2.8+/2.9+ prefer recent torch)
+torch>=2.10.0,<2.13.0
+torch-geometric>=2.7.0,<2.9.0
+
+stable-baselines3>=2.8.0,<2.10.0
+gymnasium>=0.29.1,<1.3.0
+tensorboard>=2.14.0,<2.20.0
+# Python 3.13: TensorBoard still imports removed stdlib modules / pkg_resources
+standard-imghdr>=3.13.0; python_version>="3.13"
+setuptools>=65,<81
+
+numpy>=2.0.0,<3.0.0
+pandas>=2.2.0,<3.0.0
+tqdm>=4.65.0,<5.0.0
+PyYAML>=6.0,<7.0
+
+# Optional but recommended for SB3 progress bars / richer logging
+rich>=13.0.0,<15.0.0
+cloudpickle>=2.2.0,<4.0.0

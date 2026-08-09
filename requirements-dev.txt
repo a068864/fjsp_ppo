@@ -1,0 +1,3 @@
+# Dev / test / audit tooling (install on top of requirements.txt)
+pytest>=8.0.0,<9.0.0
+pip-audit>=2.7.0,<3.0.0
