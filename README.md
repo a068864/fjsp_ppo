@@ -5,7 +5,7 @@ Deep Reinforcement Learning for **Flexible Job Shop Scheduling (FJSP)** using:
 - Stable-Baselines3 **PPO**
 - PyTorch / PyTorch Geometric
 - Gymnasium
-- CUDA (with CPU fallback)
+- CUDA / Apple Metal (MPS), with CPU fallback
 
 The environment state is a PyTorch Geometric `HeteroData` graph. A custom SB3 policy encodes the graph with heterogeneous convolutions, scores machine–operation pairs with an `EdgePredictor` (including compatibility efficiency), and masks invalid actions with `-1e9` before sampling.
 
@@ -36,12 +36,17 @@ pip install --upgrade pip
 Pick the build that matches your system ([pytorch.org](https://pytorch.org)):
 
 ```bash
-# CUDA 12.6 example
+# CUDA 12.6 example (Linux / Windows)
 pip install torch==2.10.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+
+# macOS (Apple Silicon / Metal MPS) — use the default macOS wheel
+pip install torch==2.10.0 torchvision torchaudio
 
 # CPU-only example
 pip install torch==2.10.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 ```
+
+On Mac, avoid the `+cpu` index URL if you want Metal acceleration; the default wheel includes MPS.
 
 ### 3. Install PyTorch Geometric (2.7+)
 
@@ -52,7 +57,7 @@ pip install "torch-geometric>=2.7.0,<2.9.0"
 # CUDA 12.6 / Torch 2.10:
 pip install pyg_lib torch_scatter torch_sparse -f https://data.pyg.org/whl/torch-2.10.0+cu126.html
 
-# CPU:
+# CPU / macOS:
 pip install pyg_lib torch_scatter torch_sparse -f https://data.pyg.org/whl/torch-2.10.0+cpu.html
 ```
 
@@ -67,7 +72,7 @@ pip install -r requirements-dev.txt
 ### 5. Verify
 
 ```bash
-python -c "import torch; import torch_geometric; import gymnasium; import stable_baselines3; print('ok', torch.__version__, torch.cuda.is_available())"
+python -c "import torch; import torch_geometric; import gymnasium; import stable_baselines3; print('ok', torch.__version__, 'cuda', torch.cuda.is_available(), 'mps', getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available())"
 python -m pytest -q
 ```
 
@@ -98,8 +103,9 @@ python train.py --n-envs 2 --dummy-vec --total-timesteps 8192
 # Documented parallel presets
 python train.py --n-envs 8
 
-# Device and seed
+# Device and seed (auto picks CUDA, then Apple MPS, then CPU)
 python train.py --device cuda --seed 123
+python train.py --device mps --seed 123
 
 # Larger instance
 python train.py --n-machines 10 --n-jobs 8 --avg-ops 6

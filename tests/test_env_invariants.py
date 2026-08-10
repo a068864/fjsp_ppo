@@ -1,4 +1,4 @@
-"""Environment invariants: discrete ticks, deps, masks, reset, CUDA."""
+"""Environment invariants: discrete ticks, deps, masks, reset, CUDA/MPS."""
 
 from __future__ import annotations
 
@@ -248,6 +248,25 @@ def test_gridlock_when_queued_fronts_blocked_with_idle_machine():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_optional_cuda_step_and_rollout():
     env = FJSPEnv(n_machines=2, n_jobs=2, avg_operations_per_job=2, seed=0, device="cuda")
+    env.reset(seed=0)
+    mask = env.get_action_mask()
+    valid = np.flatnonzero(mask)
+    assert valid.size > 0
+    env.step(int(valid[0]))
+    env.close()
+
+
+@pytest.mark.skipif(
+    not (
+        hasattr(torch.backends, "mps")
+        and torch.backends.mps.is_built()
+        and torch.backends.mps.is_available()
+    ),
+    reason="MPS not available",
+)
+def test_optional_mps_step_and_rollout():
+    env = FJSPEnv(n_machines=2, n_jobs=2, avg_operations_per_job=2, seed=0, device="mps")
+    assert env.device.type == "mps"
     env.reset(seed=0)
     mask = env.get_action_mask()
     valid = np.flatnonzero(mask)

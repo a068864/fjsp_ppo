@@ -36,7 +36,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--n-envs", type=int, default=None, choices=[1, 2, 4, 8, 16, 32])
     parser.add_argument("--total-timesteps", type=int, default=None)
-    parser.add_argument("--device", type=str, default=None, help="auto | cpu | cuda | cuda:0")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="auto | cpu | mps | cuda | cuda:0",
+    )
     parser.add_argument(
         "--resume",
         action="store_true",

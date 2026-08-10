@@ -1,16 +1,18 @@
 # FJSP PPO dependencies
 # Supported Python: 3.10–3.13
 #
-# Install PyTorch first for your platform/CUDA, then the rest.
+# Install PyTorch first for your platform, then the rest.
 # Example (CUDA 12.6, Torch 2.10):
 #   pip install torch==2.10.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+# Example (macOS / Apple Metal MPS — default macOS wheel):
+#   pip install torch==2.10.0 torchvision torchaudio
 # Example (CPU):
 #   pip install torch==2.10.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 #
 # Then PyG wheels (match torch + CUDA tags), e.g.:
 #   pip install torch-geometric>=2.7.0
 #   pip install pyg_lib torch_scatter torch_sparse -f https://data.pyg.org/whl/torch-2.10.0+cu126.html
-# Or for CPU:
+# Or for CPU / macOS:
 #   pip install pyg_lib torch_scatter torch_sparse -f https://data.pyg.org/whl/torch-2.10.0+cpu.html
 
 # torch>=2.10 for current security/compat matrix (SB3 2.8+/2.9+ prefer recent torch)

@@ -43,7 +43,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=None,
         help="Path to model zip (default: ./checkpoints/best_model.zip)",
     )
-    parser.add_argument("--device", type=str, default=None, help="auto | cpu | cuda")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="auto | cpu | mps | cuda | cuda:0",
+    )
     parser.add_argument(
         "--stochastic",
         action="store_true",

@@ -50,7 +50,15 @@ def test_default_configs_are_valid_and_ppo_batches_divide_rollout():
     train_cfg.validate()
     eval_cfg.validate()
     assert train_cfg.model.dropout == 0.0
+    assert train_cfg.env.n_machines == 5
+    assert train_cfg.env.n_jobs == 3
     assert (train_cfg.ppo.n_steps * train_cfg.n_envs) % train_cfg.ppo.batch_size == 0
+
+
+@pytest.mark.parametrize("device", ["auto", "cpu", "mps", "cuda", "cuda:0"])
+def test_device_strings_are_accepted(device):
+    TrainConfig(device=device).validate()
+    EvalConfig(device=device).validate()
 
 
 def test_train_config_rejects_partial_ppo_minibatch():

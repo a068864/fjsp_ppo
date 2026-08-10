@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, Literal
 
-_DEVICE_RE = re.compile(r"^(?:auto|cpu|cuda(?::(\d+))?)$")
+_DEVICE_RE = re.compile(r"^(?:auto|cpu|mps|cuda(?::(\d+))?)$")
 
 
 def _require_positive_int(name: str, value: int) -> None:
@@ -43,13 +43,14 @@ def _require_positive_float(name: str, value: float) -> None:
 
 
 def validate_device(device: str) -> None:
-    """Accept only ``auto``, ``cpu``, ``cuda``, or ``cuda:N`` with N >= 0."""
+    """Accept only ``auto``, ``cpu``, ``mps``, ``cuda``, or ``cuda:N`` with N >= 0."""
     if not isinstance(device, str):
         raise ValueError(f"device must be a string, got {device!r}")
     match = _DEVICE_RE.fullmatch(device)
     if match is None:
         raise ValueError(
-            f"device must be 'auto', 'cpu', 'cuda', or 'cuda:N' (N>=0), got {device!r}"
+            f"device must be 'auto', 'cpu', 'mps', 'cuda', or 'cuda:N' (N>=0), "
+            f"got {device!r}"
         )
     if match.group(1) is not None and int(match.group(1)) < 0:
         raise ValueError(f"device CUDA index must be >= 0, got {device!r}")

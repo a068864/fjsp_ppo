@@ -13,7 +13,7 @@ from gymnasium import spaces
 from torch_geometric.data import HeteroData
 
 from config import EnvConfig
-from utils import unflatten_action
+from utils import get_device, unflatten_action
 
 # Operation feature columns in state["operation"].x
 OP_DURATION = 0
@@ -150,7 +150,8 @@ class FJSPEnv(gym.Env):
             shared_dep_prob: Probability of shared dependencies.
             seed: Random seed for reproducibility.
             device: Torch device for graph tensors. Defaults to CPU for safe
-                use with ``SubprocVecEnv``; pass ``"cuda"`` or ``"auto"`` if needed.
+                use with ``SubprocVecEnv``; pass ``"cuda"``, ``"mps"``, or
+                ``"auto"`` if needed.
         """
         super().__init__()
 
@@ -170,10 +171,7 @@ class FJSPEnv(gym.Env):
             shared_dep_prob=shared_dep_prob,
         )
 
-        if device is None or device == "auto":
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-            self.device = torch.device(device)
+        self.device = get_device("auto" if device is None else device)
 
         # Scheduling parameters
         self.n_machines = n_machines
