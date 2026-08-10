@@ -127,49 +127,79 @@ class LatestCheckpointCallback(BaseCallback):
 
 
 class BestModelCallback(BaseCallback):
-    """Track the best mean evaluation reward and save ``best_model.zip``."""
+    """Track the best evaluation score and save ``best_model.zip``."""
 
     def __init__(
         self,
         save_path: Union[str, Path],
         verbose: int = 0,
         config: Optional[dict] = None,
+        metric: str = "mean_makespan",
     ) -> None:
         super().__init__(verbose)
         self.save_path = Path(save_path)
-        self.best_mean_reward = -np.inf
+        self.metric = str(metric)
+        if self.metric not in ("mean_reward", "mean_makespan"):
+            raise ValueError(f"Unsupported best metric: {self.metric!r}")
+        # Lower-is-better for makespan; higher-is-better for reward.
+        self.best_score = np.inf if self.metric == "mean_makespan" else -np.inf
+        # Backward-compatible alias used by older tests.
+        self.best_mean_reward = self.best_score
         self.config = config
 
     def load_persisted_best(self, checkpoint_dir: Union[str, Path]) -> None:
         """Preserve an existing best score across resume."""
-        from training.checkpoints import load_best_score
+        from training.checkpoints import load_best_score, load_best_score_record
 
+        record = load_best_score_record(checkpoint_dir)
         score = load_best_score(checkpoint_dir)
-        if score is not None:
-            self.best_mean_reward = float(score)
-
-    def update(self, mean_reward: float) -> bool:
-        """Save when ``mean_reward`` improves. Returns True if improved."""
-        if mean_reward > self.best_mean_reward:
-            self.best_mean_reward = float(mean_reward)
-            ensure_dir(self.save_path.parent)
-            from training.checkpoints import save_best_score, write_checkpoint_metadata
-
-            self.model.save(str(self.save_path))
-            save_best_score(self.save_path.parent, self.best_mean_reward)
-            if self.config is not None:
-                write_checkpoint_metadata(
-                    self.save_path,
-                    config=self.config,
-                    extra={"best_mean_reward": self.best_mean_reward},
-                )
-            logger.info(
-                "New best mean reward %.4f -> saved %s",
-                self.best_mean_reward,
-                self.save_path,
+        if score is None:
+            return
+        if record is not None and str(record.get("best_metric", self.metric)) != self.metric:
+            logger.warning(
+                "Ignoring persisted best score with metric=%s (expected %s)",
+                record.get("best_metric"),
+                self.metric,
             )
-            return True
-        return False
+            return
+        self.best_score = float(score)
+        self.best_mean_reward = self.best_score
+
+    def update(self, score: float) -> bool:
+        """Save when the configured metric improves. Returns True if improved."""
+        value = float(score)
+        if self.metric == "mean_makespan":
+            if not np.isfinite(value):
+                return False
+            improved = value < float(self.best_score)
+        else:
+            improved = value > float(self.best_score)
+        if not improved:
+            return False
+
+        self.best_score = value
+        self.best_mean_reward = value
+        ensure_dir(self.save_path.parent)
+        from training.checkpoints import save_best_score, write_checkpoint_metadata
+
+        self.model.save(str(self.save_path))
+        save_best_score(self.save_path.parent, self.best_score, metric=self.metric)
+        if self.config is not None:
+            write_checkpoint_metadata(
+                self.save_path,
+                config=self.config,
+                extra={
+                    "best_metric": self.metric,
+                    "best_score": self.best_score,
+                },
+            )
+        logger.info(
+            "New best %s %.4f -> saved %s",
+            self.metric,
+            self.best_score,
+            self.save_path,
+        )
+        return True
 
     def _on_step(self) -> bool:
         return True
@@ -189,6 +219,8 @@ class FJSPEvalCallback(BaseCallback):
         deterministic: bool = True,
         verbose: int = 0,
         config: Optional[dict] = None,
+        eval_seed: int = 0,
+        best_metric: str = "mean_makespan",
     ) -> None:
         super().__init__(verbose)
         self.eval_env = eval_env
@@ -196,8 +228,12 @@ class FJSPEvalCallback(BaseCallback):
         self.eval_freq_updates = max(1, int(eval_freq_updates))
         self.timesteps_per_update = int(n_steps) * int(n_envs)
         self.deterministic = bool(deterministic)
+        self.eval_seed = int(eval_seed)
         self.best_callback = BestModelCallback(
-            best_model_path, verbose=verbose, config=config
+            best_model_path,
+            verbose=verbose,
+            config=config,
+            metric=best_metric,
         )
         self._last_eval_update = -1
         self.config = config
@@ -219,9 +255,8 @@ class FJSPEvalCallback(BaseCallback):
             return
 
         self._last_eval_update = update_idx
-        # Reseed to the same benchmark sequence every evaluation.
-        eval_seed = int(getattr(self.model, "seed", 0) or 0)
-        self.eval_env.seed(eval_seed)
+        # Held-out deterministic episode schedule: eval_seed, eval_seed+1, ...
+        self.eval_env.seed(self.eval_seed)
         result = evaluate_policy_fjsp(
             self.model,
             self.eval_env,
@@ -229,7 +264,12 @@ class FJSPEvalCallback(BaseCallback):
             deterministic=self.deterministic,
         )
         self.best_callback.model = self.model
-        self.best_callback.update(result.mean_reward)
+        score = (
+            result.mean_makespan
+            if self.best_callback.metric == "mean_makespan"
+            else result.mean_reward
+        )
+        self.best_callback.update(score)
 
         if self.logger is not None:
             self.logger.record("eval/mean_reward", result.mean_reward)
@@ -393,6 +433,8 @@ def build_callbacks(
         deterministic=True,
         verbose=verbose,
         config=config_dict,
+        eval_seed=int(cfg.eval_seed),
+        best_metric=str(cfg.best_metric),
     )
     tb_cb = TensorboardCallback(verbose=verbose)
     lr_cb = LearningRateSchedulerCallback()

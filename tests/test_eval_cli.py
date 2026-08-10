@@ -28,4 +28,5 @@ def test_build_eval_train_config_disables_reward_norm():
     assert train_cfg.n_envs == 1
     assert train_cfg.normalize_reward is False
     assert train_cfg.seed == 11
+    assert train_cfg.eval_seed == 11
     assert train_cfg.env.n_machines == cfg.env.n_machines

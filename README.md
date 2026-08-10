@@ -172,6 +172,33 @@ python baseline_random.py --n-machines 10 --n-jobs 8 --avg-ops 6
 
 Samples uniformly among valid actions from `action_mask`. Empty masks fail fast. Reports the same metric schema as `evaluate.py` (no PPO checkpoint).
 
+## Heuristic baselines
+
+Classic FJSP dispatching rules over the valid action mask (ties → lowest flat action index):
+
+`SPT`, `LPT`, `MWKR`, `LWKR`, `MOR`, `LOR`, `FIFO`, `MFE`, `LFE`, `SQ`, `LWQM`, `ECT`.
+
+```bash
+python baseline_heuristic.py --rule SPT
+python baseline_heuristic.py --rule MWKR --n-episodes 20 --seed 123
+python baseline_heuristic.py --all --n-episodes 5
+python baseline_heuristic.py --rule ECT --n-machines 10 --n-jobs 8 --avg-ops 6
+```
+
+Requires in-process `GraphDummyVecEnv` (`n_envs=1`). Same metric schema as `evaluate.py` / the random baseline.
+
+## MILP baseline (exact)
+
+Offline PuLP+CBC makespan MILP on each held-out instance (`eval_seed + episode_index`). Uses eligibility, `duration × efficiency` processing times, and the full `precede` DAG. Only **Optimal** solves count as success.
+
+```bash
+python baseline_milp.py
+python baseline_milp.py --n-episodes 5 --seed 42
+python baseline_milp.py --time-limit 30 --n-machines 5 --n-jobs 3 --avg-ops 4
+```
+
+Demo-scale instances are the intended target; larger instances may need `--time-limit` and may not prove optimality.
+
 ---
 
 ## TensorBoard
@@ -208,6 +235,8 @@ fjsp_ppo/
   train.py                 # Training entry point
   evaluate.py              # Evaluation entry point
   baseline_random.py       # Uniform random valid-action baseline
+  baseline_heuristic.py    # Classic dispatching-rule baselines
+  baseline_milp.py         # Exact makespan MILP (PuLP+CBC)
   config.py                # All hyperparameters + validation
   callbacks.py             # Checkpoint / eval / TB / LR callbacks
   monitor.py               # Episode statistics (append-safe CSV)
@@ -215,6 +244,10 @@ fjsp_ppo/
   requirements.txt
   requirements-dev.txt
   README.md
+  heuristics/
+    dispatch_rules.py      # SPT/LPT/MWKR/... action selection
+  solvers/
+    milp.py                # FJSP instance extract + MILP solve
   envs/
     fjsp_env.py            # Gymnasium-native FJSP environment
   models/

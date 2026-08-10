@@ -1,8 +1,9 @@
-"""Evaluate FJSP with uniform random valid actions (no checkpoint).
+"""Evaluate FJSP with an exact makespan MILP (PuLP + CBC).
 
 Usage:
-    python baseline_random.py
-    python baseline_random.py --n-episodes 20 --seed 0
+    python baseline_milp.py
+    python baseline_milp.py --n-episodes 5 --seed 42
+    python baseline_milp.py --time-limit 30
 """
 
 from __future__ import annotations
@@ -17,15 +18,21 @@ from training.eval_cli import (
     apply_shared_eval_args,
     build_eval_train_config,
 )
-from training.evaluate import evaluate_random_fjsp, print_eval_result
+from training.evaluate import evaluate_milp_fjsp, print_eval_result
 from training.make_env import make_vec_env
 from utils import configure_root_logging, set_global_seed
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
-    """Parse random baseline CLI arguments."""
+    """Parse MILP baseline CLI arguments."""
     parser = argparse.ArgumentParser(
-        description="Evaluate FJSP with uniform random valid actions",
+        description="Evaluate FJSP with an exact makespan MILP (PuLP+CBC)",
+    )
+    parser.add_argument(
+        "--time-limit",
+        type=float,
+        default=None,
+        help="CBC wall-clock limit in seconds per instance (default: none)",
     )
     add_shared_eval_args(parser)
     return parser.parse_args(argv)
@@ -35,11 +42,13 @@ def run_baseline(
     cfg: Optional[EvalConfig] = None,
     args: Optional[argparse.Namespace] = None,
 ):
-    """Run random-action evaluation and print metrics."""
+    """Run MILP evaluation and print metrics."""
     configure_root_logging()
     cfg = cfg or get_default_eval_config()
+    time_limit = None
     if args is not None:
         cfg = apply_shared_eval_args(cfg, args)
+        time_limit = getattr(args, "time_limit", None)
 
     set_global_seed(cfg.seed, deterministic=True)
 
@@ -52,13 +61,13 @@ def run_baseline(
     )
 
     try:
-        eval_env.seed(cfg.seed)
-        result = evaluate_random_fjsp(
+        result = evaluate_milp_fjsp(
             eval_env,
             n_episodes=cfg.n_episodes,
             seed=cfg.seed,
+            time_limit=time_limit,
         )
-        print_eval_result(result, title="FJSP Random Baseline Results")
+        print_eval_result(result, title="FJSP MILP Baseline Results")
         return result
     finally:
         eval_env.close()

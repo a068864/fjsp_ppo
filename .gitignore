@@ -27,10 +27,14 @@ logs/**
 !logs/.gitkeep
 checkpoints/**
 !checkpoints/.gitkeep
+experiments/
 *.zip
+*.log
+events.out.tfevents.*
 
 # Brainstorm / superpowers session artifacts
 .superpowers/
+*.plan.md
 
 # IDE / OS
 .idea/

@@ -97,19 +97,48 @@ def read_checkpoint_metadata(checkpoint_path: PathLike) -> Dict[str, Any]:
 
 
 def load_best_score(checkpoint_dir: PathLike) -> Optional[float]:
-    """Return the persisted best score, or None if absent."""
+    """Return the persisted best score, or None if absent.
+
+    Supports both legacy ``best_mean_reward`` and metric-tagged payloads
+    (``best_metric`` + ``best_score``).
+    """
     path = best_score_path(checkpoint_dir)
     if not path.is_file():
         return None
     with path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
+    if "best_score" in payload:
+        return float(payload["best_score"])
     return float(payload["best_mean_reward"])
 
 
-def save_best_score(checkpoint_dir: PathLike, best_mean_reward: float) -> Path:
+def load_best_score_record(checkpoint_dir: PathLike) -> Optional[Dict[str, Any]]:
+    """Return the full best-score JSON payload, or None if absent."""
+    path = best_score_path(checkpoint_dir)
+    if not path.is_file():
+        return None
+    with path.open("r", encoding="utf-8") as handle:
+        return dict(json.load(handle))
+
+
+def save_best_score(
+    checkpoint_dir: PathLike,
+    best_score: float,
+    *,
+    metric: str = "mean_reward",
+) -> Path:
     """Persist the best evaluation score atomically."""
     path = best_score_path(checkpoint_dir)
-    atomic_write_json(path, {"best_mean_reward": float(best_mean_reward)})
+    payload: Dict[str, Any] = {
+        "best_metric": str(metric),
+        "best_score": float(best_score),
+    }
+    # Legacy key for older loaders that only look for mean reward.
+    if metric == "mean_reward":
+        payload["best_mean_reward"] = float(best_score)
+    elif metric == "mean_makespan":
+        payload["best_mean_makespan"] = float(best_score)
+    atomic_write_json(path, payload)
     return path
 
 
@@ -149,6 +178,7 @@ __all__ = [
     "best_score_path",
     "config_fingerprint",
     "load_best_score",
+    "load_best_score_record",
     "meta_path_for",
     "read_checkpoint_metadata",
     "save_best_score",

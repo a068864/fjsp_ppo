@@ -41,6 +41,8 @@ def build_eval_train_config(eval_cfg: EvalConfig) -> TrainConfig:
     """Build a TrainConfig carrying eval env settings for ``make_vec_env``."""
     train_cfg = get_default_train_config()
     train_cfg.seed = eval_cfg.seed
+    # Offline eval uses the CLI/eval seed as the held-out episode base.
+    train_cfg.eval_seed = eval_cfg.seed
     train_cfg.device = eval_cfg.device
     train_cfg.env = eval_cfg.env
     train_cfg.model = eval_cfg.model

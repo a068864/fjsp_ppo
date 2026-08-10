@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.vec_env import VecEnv
 
+from heuristics.dispatch_rules import select_heuristic_action
+from solvers.milp import extract_fjsp_instance, milp_episode_metrics, solve_makespan
 from utils import get_logger, safe_mean
 
 logger = get_logger(__name__)
@@ -285,6 +287,181 @@ def evaluate_random_fjsp(
     return result
 
 
+def evaluate_heuristic_fjsp(
+    env: VecEnv,
+    rule: str,
+    n_episodes: int = 20,
+) -> EvalResult:
+    """Run evaluation rollouts with a classic dispatching rule.
+
+    Requires an in-process DummyVecEnv exposing ``env.envs`` so rules can read
+    live ``FJSPEnv`` state (``n_envs=1`` recommended).
+
+    Args:
+        env: Vectorized evaluation environment with ``envs`` attribute.
+        rule: Dispatching rule name (see ``heuristics.RULES``).
+        n_episodes: Number of completed episodes to collect.
+
+    Returns:
+        ``EvalResult`` with reward, makespan, length, success, and select time.
+    """
+    if n_episodes <= 0:
+        raise ValueError(f"n_episodes must be positive, got {n_episodes}")
+    if not hasattr(env, "envs"):
+        raise ValueError(
+            "heuristic evaluation requires GraphDummyVecEnv (env.envs); "
+            "use make_vec_env(..., use_subprocess=False)"
+        )
+
+    episode_rewards: List[float] = []
+    episode_lengths: List[float] = []
+    episode_makespans: List[float] = []
+    episode_successes: List[float] = []
+    episode_timeouts: List[float] = []
+    inference_times: List[float] = []
+
+    n_envs = env.num_envs
+    running_rewards = np.zeros(n_envs, dtype=np.float64)
+    running_lengths = np.zeros(n_envs, dtype=np.int64)
+
+    observations = env.reset()
+    logger.info(
+        "Starting heuristic evaluation: rule=%s n_episodes=%d n_envs=%d",
+        rule,
+        n_episodes,
+        n_envs,
+    )
+
+    while len(episode_rewards) < n_episodes:
+        start = time.perf_counter()
+        actions = np.zeros(n_envs, dtype=np.int64)
+        for env_idx in range(n_envs):
+            fjsp = env.envs[env_idx].unwrapped
+            actions[env_idx] = select_heuristic_action(fjsp, rule)
+        inference_times.append(time.perf_counter() - start)
+
+        observations, rewards, dones, infos = env.step(actions)
+        running_rewards += np.asarray(rewards, dtype=np.float64)
+        running_lengths += 1
+
+        for env_idx, done in enumerate(np.asarray(dones, dtype=bool)):
+            if not done:
+                continue
+
+            info = infos[env_idx] if env_idx < len(infos) else {}
+            if not isinstance(info, dict):
+                info = {}
+
+            ep = _episode_from_info(
+                info,
+                fallback_reward=float(running_rewards[env_idx]),
+                fallback_length=int(running_lengths[env_idx]),
+            )
+
+            episode_rewards.append(float(ep.get("r", running_rewards[env_idx])))
+            episode_lengths.append(float(ep.get("l", running_lengths[env_idx])))
+            episode_makespans.append(float(ep.get("makespan", float("inf"))))
+            success = bool(ep.get("success", False))
+            episode_successes.append(1.0 if success else 0.0)
+            timed_out = bool(ep.get("truncated", info.get("TimeLimit.truncated", False)))
+            episode_timeouts.append(1.0 if timed_out and not success else 0.0)
+
+            running_rewards[env_idx] = 0.0
+            running_lengths[env_idx] = 0
+
+            if len(episode_rewards) >= n_episodes:
+                break
+
+    episode_rewards = episode_rewards[:n_episodes]
+    episode_lengths = episode_lengths[:n_episodes]
+    episode_makespans = episode_makespans[:n_episodes]
+    episode_successes = episode_successes[:n_episodes]
+    episode_timeouts = episode_timeouts[:n_episodes]
+
+    result = _aggregate_eval(
+        episode_rewards,
+        episode_lengths,
+        episode_makespans,
+        episode_successes,
+        episode_timeouts,
+        inference_times,
+    )
+    logger.info("Heuristic evaluation finished (%s):\n%s", rule, result.format_summary())
+    return result
+
+
+def evaluate_milp_fjsp(
+    env: VecEnv,
+    n_episodes: int = 20,
+    seed: int = 42,
+    *,
+    time_limit: Optional[float] = None,
+) -> EvalResult:
+    """Solve each held-out instance with an exact makespan MILP (PuLP+CBC).
+
+    Requires ``GraphDummyVecEnv`` with ``env.envs`` (``n_envs=1``). Episode ``i``
+    is loaded with seed ``seed + i`` to match the deterministic eval suite.
+    Only Optimal solves count as success; non-optimal → makespan ``inf``.
+
+    Args:
+        env: In-process vectorized env with ``envs``.
+        n_episodes: Number of instances to solve.
+        seed: Base eval seed (episode ``i`` uses ``seed + i``).
+        time_limit: Optional CBC wall-clock limit in seconds per instance.
+    """
+    if n_episodes <= 0:
+        raise ValueError(f"n_episodes must be positive, got {n_episodes}")
+    if not hasattr(env, "envs"):
+        raise ValueError(
+            "MILP evaluation requires GraphDummyVecEnv (env.envs); "
+            "use make_vec_env(..., use_subprocess=False)"
+        )
+    if env.num_envs != 1:
+        raise ValueError(f"MILP evaluation requires n_envs=1, got {env.num_envs}")
+
+    episode_rewards: List[float] = []
+    episode_lengths: List[float] = []
+    episode_makespans: List[float] = []
+    episode_successes: List[float] = []
+    episode_timeouts: List[float] = []
+    inference_times: List[float] = []
+
+    logger.info(
+        "Starting MILP evaluation: n_episodes=%d seed=%d time_limit=%s",
+        n_episodes,
+        seed,
+        time_limit,
+    )
+
+    for ep_idx in range(n_episodes):
+        env.seed(int(seed) + int(ep_idx))
+        env.reset()
+        fjsp = env.envs[0].unwrapped
+        instance = extract_fjsp_instance(fjsp)
+
+        start = time.perf_counter()
+        milp = solve_makespan(instance, time_limit=time_limit)
+        inference_times.append(time.perf_counter() - start)
+
+        ep = milp_episode_metrics(instance, milp)
+        episode_rewards.append(float(ep["r"]))
+        episode_lengths.append(float(ep["l"]))
+        episode_makespans.append(float(ep["makespan"]))
+        episode_successes.append(1.0 if ep["success"] else 0.0)
+        episode_timeouts.append(1.0 if ep.get("truncated") else 0.0)
+
+    result = _aggregate_eval(
+        episode_rewards,
+        episode_lengths,
+        episode_makespans,
+        episode_successes,
+        episode_timeouts,
+        inference_times,
+    )
+    logger.info("MILP evaluation finished:\n%s", result.format_summary())
+    return result
+
+
 def print_eval_result(result: EvalResult, title: str = "FJSP PPO Evaluation Results") -> None:
     """Print evaluation metrics to stdout."""
     print("=" * 60)
@@ -363,6 +540,8 @@ def _aggregate_eval(
 
 __all__ = [
     "EvalResult",
+    "evaluate_heuristic_fjsp",
+    "evaluate_milp_fjsp",
     "evaluate_policy_fjsp",
     "evaluate_random_fjsp",
     "print_eval_result",

@@ -46,6 +46,18 @@ def test_best_score_roundtrip(tmp_path: Path):
     assert load_best_score(tmp_path) == pytest.approx(-1.5)
 
 
+def test_best_score_persists_metric_name(tmp_path: Path):
+    from training.checkpoints import load_best_score_record
+
+    save_best_score(tmp_path, 42.5, metric="mean_makespan")
+    record = load_best_score_record(tmp_path)
+    assert record is not None
+    assert record["best_metric"] == "mean_makespan"
+    assert record["best_score"] == pytest.approx(42.5)
+    assert record["best_mean_makespan"] == pytest.approx(42.5)
+    assert load_best_score(tmp_path) == pytest.approx(42.5)
+
+
 def test_metadata_fingerprint_and_incompatible_resume(tmp_path: Path):
     ckpt = tmp_path / "latest_model.zip"
     ckpt.write_bytes(b"zip")

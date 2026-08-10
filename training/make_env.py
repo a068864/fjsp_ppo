@@ -47,7 +47,7 @@ def stack_fjsp_obs(obs_list: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def make_sb3_observation_space(n_actions: int) -> spaces.Dict:
-    """Backward-compatible alias for the canonical GraphObs SB3 Dict space."""
+    """ Backward-compatible alias for the canonical GraphObs SB3 Dict space."""
     return make_sb3_graph_observation_space(n_actions)
 
 
@@ -62,14 +62,16 @@ def make_env_fn(
 
     def _init() -> gym.Env:
         env_cfg: EnvConfig = cfg.env
-        seed = worker_seed(cfg.seed, rank)
+        if for_eval:
+            seed = int(cfg.eval_seed) + int(rank)
+        else:
+            seed = worker_seed(cfg.seed, rank)
         env = FJSPEnv(
             n_machines=env_cfg.n_machines,
             n_jobs=env_cfg.n_jobs,
             avg_operations_per_job=env_cfg.avg_operations_per_job,
             time_penalty=env_cfg.time_penalty,
             max_operation_duration=env_cfg.max_operation_duration,
-            completion_reward=env_cfg.completion_reward,
             connection_drop_prob=env_cfg.connection_drop_prob,
             compatible_efficiency_std=env_cfg.compatible_efficiency_std,
             time_step=env_cfg.time_step,
@@ -90,9 +92,19 @@ def make_env_fn(
 
 
 class GraphDummyVecEnv(VecEnv):
-    """In-process vectorized env that preserves HeteroData observations."""
+    """In-process vectorized env that preserves HeteroData observations.
 
-    def __init__(self, env_fns: Sequence[Callable[[], gym.Env]]) -> None:
+    When ``for_eval=True``, autoresets use a deterministic episode seed schedule
+    ``base + episode_index`` so multi-episode evaluation is reproducible.
+    Training autoresets remain seedless (random instance regeneration).
+    """
+
+    def __init__(
+        self,
+        env_fns: Sequence[Callable[[], gym.Env]],
+        *,
+        for_eval: bool = False,
+    ) -> None:
         self.envs = [fn() for fn in env_fns]
         env = self.envs[0]
         n_actions = int(env.action_space.n)
@@ -106,6 +118,9 @@ class GraphDummyVecEnv(VecEnv):
         self.buf_rews = np.zeros(self.num_envs, dtype=np.float64)
         self.buf_dones = np.zeros(self.num_envs, dtype=bool)
         self.buf_infos: List[Dict[str, Any]] = [{} for _ in range(self.num_envs)]
+        self.for_eval = bool(for_eval)
+        self._episode_seed_base: List[Optional[int]] = [None] * self.num_envs
+        self._episode_counters = [0] * self.num_envs
 
     def reset(self) -> Dict[str, Any]:
         obs_list: List[Dict[str, Any]] = []
@@ -113,9 +128,14 @@ class GraphDummyVecEnv(VecEnv):
             maybe_options = (
                 {"options": self._options[env_idx]} if self._options[env_idx] else {}
             )
-            obs, self.reset_infos[env_idx] = env.reset(
-                seed=self._seeds[env_idx], **maybe_options
-            )
+            seed = self._seeds[env_idx]
+            obs, self.reset_infos[env_idx] = env.reset(seed=seed, **maybe_options)
+            if self.for_eval and seed is not None:
+                self._episode_seed_base[env_idx] = int(seed)
+                self._episode_counters[env_idx] = 1
+            else:
+                self._episode_seed_base[env_idx] = None
+                self._episode_counters[env_idx] = 0
             obs_list.append(obs)
         self._reset_seeds()
         self._reset_options()
@@ -140,7 +160,16 @@ class GraphDummyVecEnv(VecEnv):
             self.buf_infos[env_idx] = info
             if done:
                 self.buf_infos[env_idx]["terminal_observation"] = obs
-                obs, reset_info = self.envs[env_idx].reset()
+                reset_seed = None
+                if self.for_eval and self._episode_seed_base[env_idx] is not None:
+                    reset_seed = int(
+                        self._episode_seed_base[env_idx] + self._episode_counters[env_idx]
+                    )
+                    self._episode_counters[env_idx] += 1
+                if reset_seed is None:
+                    obs, reset_info = self.envs[env_idx].reset()
+                else:
+                    obs, reset_info = self.envs[env_idx].reset(seed=reset_seed)
                 self.reset_infos[env_idx] = reset_info
             obs_list.append(obs)
         return (
@@ -181,6 +210,9 @@ class GraphDummyVecEnv(VecEnv):
         if seed is None:
             seed = 0
         self._seeds = [seed + i for i in range(self.num_envs)]
+        if self.for_eval:
+            self._episode_seed_base = [int(s) for s in self._seeds]
+            self._episode_counters = [0] * self.num_envs
         return list(self._seeds)
 
 
@@ -230,9 +262,12 @@ def make_vec_env(
         cfg: Training configuration.
         n_envs: Override for ``cfg.n_envs``. Documented presets: 8, 16, 32.
         use_subprocess: If True, use ``GraphSubprocVecEnv``; if False, use
-            ``GraphDummyVecEnv``. Defaults to subprocess when ``n_envs > 1``.
+            ``GraphDummyVecEnv``. Defaults to subprocess when ``n_envs > 1``
+            and not evaluating. Eval always uses in-process DummyVecEnv so
+            episode seed schedules and heuristics work.
         monitor_dir: Optional monitor output directory.
-        for_eval: Unused; kept for call-site compatibility.
+        for_eval: When True, use held-out ``cfg.eval_seed`` and deterministic
+            per-episode autoreset seeds.
 
     Returns:
         Vectorized environment preserving ``HeteroData`` graphs in observations.
@@ -241,7 +276,9 @@ def make_vec_env(
     if n <= 0:
         raise ValueError(f"n_envs must be positive, got {n}")
 
-    if use_subprocess is None:
+    if for_eval:
+        use_subprocess = False
+    elif use_subprocess is None:
         use_subprocess = n > 1
 
     env_fns = [
@@ -253,8 +290,12 @@ def make_vec_env(
         logger.info("Creating GraphSubprocVecEnv with n_envs=%d", n)
         return GraphSubprocVecEnv(env_fns)
 
-    logger.info("Creating GraphDummyVecEnv with n_envs=%d", n)
-    return GraphDummyVecEnv(env_fns)
+    logger.info(
+        "Creating GraphDummyVecEnv with n_envs=%d for_eval=%s",
+        n,
+        for_eval,
+    )
+    return GraphDummyVecEnv(env_fns, for_eval=for_eval)
 
 
 __all__ = [

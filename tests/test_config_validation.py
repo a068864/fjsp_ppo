@@ -34,6 +34,8 @@ from training.eval_cli import apply_shared_eval_args
         (lambda: TrainConfig(n_envs=0), "n_envs"),
         (lambda: TrainConfig(device="gpu"), "device"),
         (lambda: TrainConfig(checkpoint_freq_updates=0), "checkpoint_freq_updates"),
+        (lambda: TrainConfig(eval_seed=-1), "eval_seed"),
+        (lambda: TrainConfig(best_metric="nope"), "best_metric"),  # type: ignore[arg-type]
         (lambda: EvalConfig(n_episodes=0), "n_episodes"),
         (lambda: EvalConfig(device="cuda:-1"), "device"),
     ],
@@ -53,6 +55,8 @@ def test_default_configs_are_valid_and_ppo_batches_divide_rollout():
     assert train_cfg.env.n_machines == 5
     assert train_cfg.env.n_jobs == 3
     assert (train_cfg.ppo.n_steps * train_cfg.n_envs) % train_cfg.ppo.batch_size == 0
+    assert train_cfg.eval_seed == train_cfg.seed + 1_000_000
+    assert train_cfg.best_metric == "mean_makespan"
 
 
 @pytest.mark.parametrize("device", ["auto", "cpu", "mps", "cuda", "cuda:0"])

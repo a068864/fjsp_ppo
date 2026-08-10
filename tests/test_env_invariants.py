@@ -174,8 +174,8 @@ def test_rollout_matches_repeated_tick_advance():
         processing, blocked = env._get_processing_operations()
         if not processing.any():
             break
-        completed = env._advance_time_tick()
-        r_ticks += float(env.time_penalty) + len(completed) * float(env.completion_reward)
+        env._advance_time_tick()
+        r_ticks += float(env.time_penalty)
     success_ticks = bool(torch.all(env.state["operation"].x[:, OP_FINISHED] > 0.5))
     assert success_rollout == success_ticks
     assert r_rollout == pytest.approx(r_ticks, abs=1e-5)

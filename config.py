@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Dict, Literal
+from typing import Any, Dict, Literal, Optional
 
 _DEVICE_RE = re.compile(r"^(?:auto|cpu|mps|cuda(?::(\d+))?)$")
 
@@ -65,7 +65,6 @@ class EnvConfig:
     avg_operations_per_job: int = 4
     time_penalty: float = -0.1
     max_operation_duration: int = 20
-    completion_reward: float = 0.3
     connection_drop_prob: float = 0.6
     compatible_efficiency_std: float = 0.2
     time_step: float = 1.0
@@ -159,7 +158,7 @@ class PPOConfig:
     """Stable-Baselines3 PPO hyperparameters."""
 
     learning_rate: float = 1e-4
-    gamma: float = 0.99
+    gamma: float = 1.0
     gae_lambda: float = 0.95
     clip_range: float = 0.2
     n_steps: int = 2048
@@ -196,6 +195,10 @@ class PPOConfig:
             _require_positive_float("target_kl", float(self.target_kl))
 
 
+# Held-out eval seeds sit far from training worker seeds (seed + rank*1000).
+EVAL_SEED_OFFSET = 1_000_000
+
+
 @dataclass
 class TrainConfig:
     """Top-level training configuration."""
@@ -211,6 +214,9 @@ class TrainConfig:
     checkpoint_freq_updates: int = 10
     eval_freq_updates: int = 10
     n_eval_episodes: int = 5
+    # Held-out eval seed base; episode i uses eval_seed + i.
+    eval_seed: Optional[int] = None
+    best_metric: Literal["mean_reward", "mean_makespan"] = "mean_makespan"
     lr_schedule: Literal["constant", "linear"] = "linear"
     lr_end_fraction: float = 0.1
     normalize_reward: bool = False
@@ -227,6 +233,8 @@ class TrainConfig:
             self.model = ModelConfig(**self.model)  # type: ignore[arg-type]
         if not isinstance(self.ppo, PPOConfig):
             self.ppo = PPOConfig(**self.ppo)  # type: ignore[arg-type]
+        if self.eval_seed is None:
+            self.eval_seed = int(self.seed) + EVAL_SEED_OFFSET
         self.validate()
 
     def latest_model_path(self) -> Path:
@@ -248,6 +256,9 @@ class TrainConfig:
         _require_positive_int("checkpoint_freq_updates", self.checkpoint_freq_updates)
         _require_positive_int("eval_freq_updates", self.eval_freq_updates)
         _require_positive_int("n_eval_episodes", self.n_eval_episodes)
+        _require_non_negative_int("eval_seed", int(self.eval_seed))
+        if self.best_metric not in ("mean_reward", "mean_makespan"):
+            raise ValueError(f"best_metric is invalid: {self.best_metric!r}")
         validate_device(self.device)
         if self.lr_schedule not in ("constant", "linear"):
             raise ValueError(f"lr_schedule is invalid: {self.lr_schedule!r}")
@@ -322,7 +333,7 @@ def get_debug_train_config() -> TrainConfig:
         ),
         ppo=PPOConfig(
             learning_rate=1e-4,
-            gamma=0.99,
+            gamma=1.0,
             clip_range=0.2,
             n_steps=256,
             batch_size=64,

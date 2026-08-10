@@ -123,7 +123,6 @@ class FJSPEnv(gym.Env):
         avg_operations_per_job: int = 4,
         time_penalty: float = -0.1,
         max_operation_duration: int = 20,
-        completion_reward: float = 0.3,
         connection_drop_prob: float = 0.6,
         compatible_efficiency_std: float = 0.2,
         time_step: float = 1.0,
@@ -141,7 +140,6 @@ class FJSPEnv(gym.Env):
             avg_operations_per_job: Average operations per job.
             time_penalty: Penalty for time consumption.
             max_operation_duration: Maximum duration of an operation.
-            completion_reward: Reward for completing an operation.
             connection_drop_prob: Probability of dropping machine-operation connections.
             compatible_efficiency_std: Standard deviation for machine efficiency.
             time_step: Granularity of time progression.
@@ -162,7 +160,6 @@ class FJSPEnv(gym.Env):
             avg_operations_per_job=avg_operations_per_job,
             time_penalty=time_penalty,
             max_operation_duration=max_operation_duration,
-            completion_reward=completion_reward,
             connection_drop_prob=connection_drop_prob,
             compatible_efficiency_std=compatible_efficiency_std,
             time_step=time_step,
@@ -182,7 +179,6 @@ class FJSPEnv(gym.Env):
         # Scheduling constraints and rewards
         self.time_penalty = time_penalty
         self.max_operation_duration = max_operation_duration
-        self.completion_reward = completion_reward
         self.connection_drop_prob = connection_drop_prob
         self.cross_job_dep_prob = cross_job_dep_prob
         self.shared_dep_prob = shared_dep_prob
@@ -1146,9 +1142,8 @@ class FJSPEnv(gym.Env):
             info["is_gridlock"] = True
             return obs, float(self.time_penalty), True, False, info
 
-        completed_ids = self._advance_time_tick()
-        n_completed = len(completed_ids)
-        reward = self.time_penalty + n_completed * self.completion_reward
+        self._advance_time_tick()
+        reward = self.time_penalty
 
         # Detect gridlock after the tick (e.g. newly blocked fronts).
         processing_ops, blocked_machines = self._get_processing_operations()
@@ -1207,10 +1202,8 @@ class FJSPEnv(gym.Env):
             if not processing_ops.any():
                 return reward, False
 
-            completed_ids = self._advance_time_tick()
-            reward += float(self.time_penalty) + len(completed_ids) * float(
-                self.completion_reward
-            )
+            self._advance_time_tick()
+            reward += float(self.time_penalty)
             guard += 1
             if guard > max_ticks:
                 return reward, False
