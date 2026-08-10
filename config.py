@@ -307,7 +307,7 @@ class EvalConfig:
 # Demo / smoke-test instance (EnvConfig field defaults): 5×3×4.
 DEBUG_SCALE_ENV = EnvConfig()
 
-# Full-scale instance for later serious runs (switch get_default_* back to this).
+# Full-scale instance for serious runs.
 FULL_SCALE_ENV = EnvConfig(
     n_machines=25,
     n_jobs=15,
@@ -347,11 +347,11 @@ def get_debug_train_config() -> TrainConfig:
 
 
 def get_default_train_config() -> TrainConfig:
-    """Return the default training configuration (demo-scale until verified)."""
-    return get_debug_train_config()
+    """Return the default training configuration (full-scale)."""
+    return TrainConfig(env=replace(FULL_SCALE_ENV))
 
 
 def get_default_eval_config() -> EvalConfig:
-    """Return the default evaluation configuration (demo-scale until verified)."""
-    cfg = get_debug_train_config()
+    """Return the default evaluation configuration (full-scale)."""
+    cfg = get_default_train_config()
     return EvalConfig(env=replace(cfg.env), model=replace(cfg.model))

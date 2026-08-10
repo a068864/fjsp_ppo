@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import Batch, HeteroData
-from torch_geometric.nn import HeteroConv, SAGEConv
+from torch_geometric.nn import AttentionalAggregation, HeteroConv, TransformerConv
 
 from utils import get_logger
 
@@ -21,13 +21,25 @@ EDGE_TYPES: List[Tuple[str, str, str]] = [
     ("operation", "compatible", "machine"),
 ]
 
+REVERSE_EDGE_TYPES: Dict[
+    Tuple[str, str, str], Tuple[str, str, str]
+] = {
+    ("operation", "precede", "operation"): ("operation", "succeed", "operation"),
+    ("operation", "next", "operation"): ("operation", "previous", "operation"),
+    ("machine", "processing", "operation"): ("operation", "processed_by", "machine"),
+    ("operation", "compatible", "machine"): ("machine", "compatible_with", "operation"),
+}
+
+MESSAGE_EDGE_TYPES = EDGE_TYPES + list(REVERSE_EDGE_TYPES.values())
+
 
 class HeteroResidualBlock(nn.Module):
-    """One HeteroConv layer with residual connection, LayerNorm, and Dropout."""
+    """Edge-aware heterogeneous TransformerConv layer with residual normalization."""
 
     def __init__(
         self,
         hidden_dim: int,
+        num_heads: int = 4,
         dropout: float = 0.1,
         aggr: str = "sum",
     ) -> None:
@@ -35,17 +47,24 @@ class HeteroResidualBlock(nn.Module):
         self.hidden_dim = hidden_dim
         self.dropout = float(dropout)
 
+        if hidden_dim % num_heads != 0:
+            raise ValueError(
+                f"hidden_dim ({hidden_dim}) must be divisible by num_heads ({num_heads})"
+            )
+
         convs: Dict[Tuple[str, str, str], nn.Module] = {}
-        for edge_type in EDGE_TYPES:
-            src, _, dst = edge_type
-            if src == dst:
-                convs[edge_type] = SAGEConv(hidden_dim, hidden_dim, aggr="mean")
-            else:
-                convs[edge_type] = SAGEConv(
-                    (hidden_dim, hidden_dim),
-                    hidden_dim,
-                    aggr="mean",
-                )
+        for edge_type in MESSAGE_EDGE_TYPES:
+            # root_weight=False: residual is applied outside the conv (same as
+            # GATv2 residual=False). Edge attrs enter attention and values.
+            convs[edge_type] = TransformerConv(
+                (hidden_dim, hidden_dim),
+                hidden_dim // num_heads,
+                heads=num_heads,
+                concat=True,
+                dropout=self.dropout,
+                edge_dim=1,
+                root_weight=False,
+            )
 
         self.conv = HeteroConv(convs, aggr=aggr)
         self.norm_operation = nn.LayerNorm(hidden_dim)
@@ -56,6 +75,7 @@ class HeteroResidualBlock(nn.Module):
         self,
         x_dict: Dict[str, torch.Tensor],
         edge_index_dict: Dict[Tuple[str, str, str], torch.Tensor],
+        edge_attr_dict: Dict[Tuple[str, str, str], torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
         residual = {key: value for key, value in x_dict.items()}
         filtered_edges = {
@@ -70,7 +90,15 @@ class HeteroResidualBlock(nn.Module):
         }
 
         if filtered_edges:
-            out = self.conv(x_dict, filtered_edges)
+            filtered_attrs = {
+                edge_type: edge_attr_dict[edge_type]
+                for edge_type in filtered_edges
+            }
+            out = self.conv(
+                x_dict,
+                filtered_edges,
+                edge_attr_dict=filtered_attrs,
+            )
         else:
             out = {key: value for key, value in x_dict.items()}
 
@@ -101,15 +129,15 @@ class GraphEncoder(nn.Module):
     """Encode FJSP ``HeteroData`` into machine, operation, and graph embeddings.
 
     Architecture:
-        Linear input projections -> stacked HeteroConv residual blocks ->
-        global mean pooling over operations and machines -> graph MLP.
+        Linear input projections -> edge-aware bidirectional TransformerConv
+        blocks -> attentional pooling over operations and machines -> graph MLP.
 
     Args:
         operation_in_dim: Operation node feature dimension (default 10).
         machine_in_dim: Machine node feature dimension (default 3).
         hidden_dim: Latent width for node embeddings.
         num_layers: Number of heterogeneous residual blocks.
-        num_heads: Kept for config compatibility (SAGEConv path does not use heads).
+        num_heads: Number of TransformerConv attention heads.
         dropout: Dropout probability after each block.
     """
 
@@ -150,11 +178,31 @@ class GraphEncoder(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                HeteroResidualBlock(hidden_dim=hidden_dim, dropout=dropout)
+                HeteroResidualBlock(
+                    hidden_dim=hidden_dim,
+                    num_heads=num_heads,
+                    dropout=dropout,
+                )
                 for _ in range(self.num_layers)
             ]
         )
 
+        self.operation_pool = AttentionalAggregation(
+            gate_nn=nn.Linear(hidden_dim, 1),
+            nn=nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            ),
+        )
+        self.machine_pool = AttentionalAggregation(
+            gate_nn=nn.Linear(hidden_dim, 1),
+            nn=nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            ),
+        )
         self.graph_mlp = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -188,25 +236,63 @@ class GraphEncoder(nn.Module):
             "machine": self.machine_encoder(mach_x),
         }
 
-    def _edge_index_dict(
+    def _message_edges(
         self, data: HeteroData
-    ) -> Dict[Tuple[str, str, str], torch.Tensor]:
+    ) -> Tuple[
+        Dict[Tuple[str, str, str], torch.Tensor],
+        Dict[Tuple[str, str, str], torch.Tensor],
+    ]:
         edge_index_dict: Dict[Tuple[str, str, str], torch.Tensor] = {}
+        edge_attr_dict: Dict[Tuple[str, str, str], torch.Tensor] = {}
         for edge_type in EDGE_TYPES:
             if edge_type in data.edge_types:
                 edge_index = data[edge_type].edge_index
                 if edge_index is not None and edge_index.numel() > 0:
+                    edge_attr = getattr(data[edge_type], "edge_attr", None)
+                    if edge_attr is None:
+                        edge_attr = torch.zeros(
+                            (edge_index.size(1), 1),
+                            dtype=torch.float32,
+                            device=edge_index.device,
+                        )
+                    else:
+                        edge_attr = edge_attr.float().reshape(edge_index.size(1), -1)
+                        if edge_attr.size(1) != 1:
+                            raise ValueError(
+                                f"{edge_type} edge_attr must have one feature, "
+                                f"got {edge_attr.size(1)}"
+                            )
                     edge_index_dict[edge_type] = edge_index
-        return edge_index_dict
+                    edge_attr_dict[edge_type] = edge_attr
+                    reverse_type = REVERSE_EDGE_TYPES[edge_type]
+                    edge_index_dict[reverse_type] = edge_index.flip(0)
+                    edge_attr_dict[reverse_type] = edge_attr
+        return edge_index_dict, edge_attr_dict
 
     def _encode_x_dict(
         self,
         x_dict: Dict[str, torch.Tensor],
         edge_index_dict: Dict[Tuple[str, str, str], torch.Tensor],
+        edge_attr_dict: Dict[Tuple[str, str, str], torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
         for layer in self.layers:
-            x_dict = layer(x_dict, edge_index_dict)
+            x_dict = layer(x_dict, edge_index_dict, edge_attr_dict)
         return x_dict
+
+    def _pool_graph(
+        self,
+        operation_emb: torch.Tensor,
+        machine_emb: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.graph_mlp(
+            torch.cat(
+                [
+                    self.operation_pool(operation_emb).reshape(-1),
+                    self.machine_pool(machine_emb).reshape(-1),
+                ],
+                dim=-1,
+            )
+        )
 
     @staticmethod
     def _batchable_view(data: HeteroData) -> HeteroData:
@@ -256,14 +342,12 @@ class GraphEncoder(nn.Module):
                 local[edge_type].edge_attr = edge_attr.to(device, copy=True)
 
         x_dict = self._project_nodes(local)
-        edge_index_dict = self._edge_index_dict(local)
-        x_dict = self._encode_x_dict(x_dict, edge_index_dict)
+        edge_index_dict, edge_attr_dict = self._message_edges(local)
+        x_dict = self._encode_x_dict(x_dict, edge_index_dict, edge_attr_dict)
 
         operation_emb = x_dict["operation"]
         machine_emb = x_dict["machine"]
-        graph_emb = self.graph_mlp(
-            torch.cat([operation_emb.mean(dim=0), machine_emb.mean(dim=0)], dim=-1)
-        )
+        graph_emb = self._pool_graph(operation_emb, machine_emb)
         return machine_emb, operation_emb, graph_emb
 
     def encode_batch(
@@ -322,8 +406,8 @@ class GraphEncoder(nn.Module):
             return machine_list, operation_list, torch.stack(graph_list, dim=0)
 
         x_dict = self._project_nodes(batch)
-        edge_index_dict = self._edge_index_dict(batch)
-        x_dict = self._encode_x_dict(x_dict, edge_index_dict)
+        edge_index_dict, edge_attr_dict = self._message_edges(batch)
+        x_dict = self._encode_x_dict(x_dict, edge_index_dict, edge_attr_dict)
 
         operation_emb = x_dict["operation"]
         machine_emb = x_dict["machine"]
@@ -339,10 +423,14 @@ class GraphEncoder(nn.Module):
             mach_i = machine_emb[mach_ptr[i] : mach_ptr[i + 1]]
             operation_list.append(op_i)
             machine_list.append(mach_i)
-            graph_list.append(
-                self.graph_mlp(torch.cat([op_i.mean(dim=0), mach_i.mean(dim=0)], dim=-1))
-            )
+            graph_list.append(self._pool_graph(op_i, mach_i))
         return machine_list, operation_list, torch.stack(graph_list, dim=0)
 
 
-__all__ = ["EDGE_TYPES", "GraphEncoder", "HeteroResidualBlock"]
+__all__ = [
+    "EDGE_TYPES",
+    "MESSAGE_EDGE_TYPES",
+    "REVERSE_EDGE_TYPES",
+    "GraphEncoder",
+    "HeteroResidualBlock",
+]

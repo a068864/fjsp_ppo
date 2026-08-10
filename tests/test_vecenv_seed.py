@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from config import get_default_eval_config, get_default_train_config
+from config import get_default_eval_config, get_debug_train_config
 from heuristics import RULES
 from training.eval_cli import build_eval_train_config
 from training.evaluate import (
@@ -16,7 +16,7 @@ from training.make_env import GraphDummyVecEnv, make_env_fn, make_vec_env
 
 
 def test_make_env_fn_does_not_eager_reset():
-    cfg = get_default_train_config()
+    cfg = get_debug_train_config()
     cfg.n_envs = 1
     calls = {"reset": 0}
     thunk = make_env_fn(cfg, rank=0, for_eval=False)
@@ -37,7 +37,7 @@ def test_make_env_fn_does_not_eager_reset():
 
 
 def test_dummy_vec_deferred_seed_applies_on_first_reset():
-    cfg = get_default_train_config()
+    cfg = get_debug_train_config()
     cfg.n_envs = 2
     cfg.seed = 123
     env = make_vec_env(cfg, n_envs=2, use_subprocess=False, for_eval=True)
@@ -51,7 +51,7 @@ def test_dummy_vec_deferred_seed_applies_on_first_reset():
 
 
 def test_deterministic_instance_sequence_with_fixed_seed():
-    cfg = get_default_train_config()
+    cfg = get_debug_train_config()
     cfg.n_envs = 1
     cfg.seed = 7
     cfg.eval_seed = 7
@@ -71,7 +71,7 @@ def test_deterministic_instance_sequence_with_fixed_seed():
 
 
 def test_eval_autoreset_uses_deterministic_episode_seeds():
-    cfg = get_default_train_config()
+    cfg = get_debug_train_config()
     cfg.eval_seed = 1_000_042
     env = make_vec_env(cfg, n_envs=1, use_subprocess=False, for_eval=True)
     try:
@@ -111,7 +111,7 @@ def test_eval_autoreset_uses_deterministic_episode_seeds():
 
 
 def test_train_autoreset_remains_unseeded_random():
-    cfg = get_default_train_config()
+    cfg = get_debug_train_config()
     env = make_vec_env(cfg, n_envs=1, use_subprocess=False, for_eval=False)
     try:
         env.seed(7)
@@ -133,7 +133,7 @@ def test_train_autoreset_remains_unseeded_random():
 
 
 def test_dummy_and_subprocess_first_reset_parity():
-    cfg = get_default_train_config()
+    cfg = get_debug_train_config()
     cfg.n_envs = 2
     cfg.seed = 11
 

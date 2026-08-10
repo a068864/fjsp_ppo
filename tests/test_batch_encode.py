@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import torch
+from torch_geometric.nn import TransformerConv
 
 from config import ModelConfig
 from envs.fjsp_env import FJSPEnv
 from models.actor_critic import GraphActorCritic
-from models.graph_encoder import GraphEncoder
+from models.edge_predictor import EdgePredictor
+from models.graph_encoder import GraphEncoder, REVERSE_EDGE_TYPES
 
 
 def test_encode_batch_same_size_shapes():
@@ -22,6 +24,52 @@ def test_encode_batch_same_size_shapes():
     assert m_list[0].shape[0] == env.n_machines
     assert o_list[0].shape[0] == env.n_operations
     env.close()
+
+
+def test_encoder_uses_multihead_transformer_and_reverse_relations():
+    enc = GraphEncoder(hidden_dim=32, num_layers=1, num_heads=4, dropout=0.0)
+    convs = enc.layers[0].conv.convs
+    assert all(isinstance(conv, TransformerConv) for conv in convs.values())
+    assert all(conv.heads == 4 for conv in convs.values())
+    assert all(conv.edge_dim == 1 for conv in convs.values())
+    assert all(conv.root_weight is False for conv in convs.values())
+    assert all(reverse in convs for reverse in REVERSE_EDGE_TYPES.values())
+
+
+def test_compatibility_edge_attributes_reach_operation_embeddings():
+    env = FJSPEnv(
+        n_machines=3,
+        n_jobs=2,
+        avg_operations_per_job=2,
+        seed=0,
+        device="cpu",
+    )
+    graph = env.reset(seed=0)[0]["graph"]
+    changed = graph.clone()
+    key = ("operation", "compatible", "machine")
+    changed[key].edge_attr = changed[key].edge_attr * 0.5
+    enc = GraphEncoder(hidden_dim=16, num_layers=1, num_heads=2, dropout=0.0)
+    enc.eval()
+    with torch.no_grad():
+        machines_a, operations_a, graph_a = enc(graph)
+        machines_b, operations_b, graph_b = enc(changed)
+    # Compatible edges update machines; reverse edges / pooling carry the change.
+    assert not torch.allclose(machines_a, machines_b)
+    assert not torch.allclose(graph_a, graph_b)
+    env.close()
+
+
+def test_bilinear_predictor_uses_efficiency_bias():
+    torch.manual_seed(0)
+    predictor = EdgePredictor(hidden_dim=8, predictor_type="bilinear")
+    predictor.eval()
+    machines = torch.randn(2, 8)
+    operations = torch.randn(3, 8)
+    with torch.no_grad():
+        without_eff = predictor(machines, operations, None)
+        with_eff = predictor(machines, operations, torch.ones(3, 2))
+    assert without_eff.shape == (6,)
+    assert not torch.allclose(without_eff, with_eff)
 
 
 def test_actor_critic_batch_forward():

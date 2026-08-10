@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from callbacks import BestModelCallback, FJSPEvalCallback, LatestCheckpointCallback
-from config import get_default_train_config
+from config import get_debug_train_config
 from train import maybe_resume, resolve_resume_path
 from training.checkpoints import load_best_score, save_best_score, write_checkpoint_metadata
 
@@ -66,9 +66,7 @@ def test_best_callback_minimizes_makespan(tmp_path: Path):
 
 def test_eval_callback_reseeds_held_out_schedule(tmp_path: Path, monkeypatch):
     """FJSPEvalCallback must reseed with cfg.eval_seed before each eval."""
-    from config import get_default_train_config
-
-    cfg = get_default_train_config()
+    cfg = get_debug_train_config()
     cfg.eval_seed = 1_000_007
     seeded = []
 
@@ -131,7 +129,7 @@ def test_final_training_end_saves_latest(tmp_path: Path):
 
 
 def test_resume_requires_explicit_trust(tmp_path: Path):
-    cfg = get_default_train_config()
+    cfg = get_debug_train_config()
     cfg.checkpoint_dir = str(tmp_path)
     cfg.resume = True
     cfg.trust_checkpoint = False

@@ -52,8 +52,9 @@ def test_default_configs_are_valid_and_ppo_batches_divide_rollout():
     train_cfg.validate()
     eval_cfg.validate()
     assert train_cfg.model.dropout == 0.0
-    assert train_cfg.env.n_machines == 5
-    assert train_cfg.env.n_jobs == 3
+    assert train_cfg.env.n_machines == 25
+    assert train_cfg.env.n_jobs == 15
+    assert train_cfg.env.avg_operations_per_job == 8
     assert (train_cfg.ppo.n_steps * train_cfg.n_envs) % train_cfg.ppo.batch_size == 0
     assert train_cfg.eval_seed == train_cfg.seed + 1_000_000
     assert train_cfg.best_metric == "mean_makespan"
