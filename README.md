@@ -204,7 +204,6 @@ fjsp_ppo/
   baseline_random.py       # Uniform random valid-action baseline
   config.py                # All hyperparameters + validation
   callbacks.py             # Checkpoint / eval / TB / LR callbacks
-  wrappers.py              # TimeLimit only (no reward normalization)
   monitor.py               # Episode statistics (append-safe CSV)
   utils.py                 # Seeds, device, unflatten_action, logging
   requirements.txt

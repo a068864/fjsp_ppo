@@ -7,42 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from config import get_default_eval_config
 from monitor import FJSPMonitor
 from training.evaluate import EvalResult, sample_masked_random_actions
-from wrappers import wrap_fjsp_env
-
-
-class _BoomEnv:
-    """Minimal env stand-in that fails on step and tracks close()."""
-
-    def __init__(self):
-        self.closed = False
-        self.action_space = type("A", (), {"n": 2})()
-        self.observation_space = None
-
-    def reset(self, **kwargs):
-        return {"dummy": np.zeros(1, dtype=np.float32), "action_mask": np.ones(2, dtype=np.float32), "graph": None}, {}
-
-    def step(self, action):
-        raise RuntimeError("injected failure")
-
-    def close(self):
-        self.closed = True
-
-
-def test_wrap_fjsp_env_never_adds_reward_normalization():
-    from envs.fjsp_env import FJSPEnv
-
-    env = FJSPEnv(n_machines=2, n_jobs=2, avg_operations_per_job=2, seed=0, device="cpu")
-    wrapped = wrap_fjsp_env(env, max_episode_steps=10, normalize_reward=True)
-    names = []
-    cur = wrapped
-    while cur is not None:
-        names.append(type(cur).__name__)
-        cur = getattr(cur, "env", None)
-    assert "RewardNormalizeWrapper" not in names
-    wrapped.close()
 
 
 def test_monitor_appends_without_truncating_history(tmp_path: Path):

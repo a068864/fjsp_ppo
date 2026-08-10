@@ -14,7 +14,6 @@ from config import EnvConfig, TrainConfig
 from envs.fjsp_env import FJSPEnv, make_sb3_graph_observation_space
 from monitor import FJSPMonitor
 from utils import get_logger, worker_seed
-from wrappers import wrap_fjsp_env
 
 logger = get_logger(__name__)
 
@@ -79,12 +78,6 @@ def make_env_fn(
             shared_dep_prob=env_cfg.shared_dep_prob,
             seed=seed,
             device="cpu",
-        )
-        normalize = False if for_eval else bool(cfg.normalize_reward)
-        env = wrap_fjsp_env(
-            env,
-            max_episode_steps=env_cfg.max_episode_steps,
-            normalize_reward=normalize,
         )
         monitor_path = None
         if monitor_dir is not None:
@@ -239,7 +232,7 @@ def make_vec_env(
         use_subprocess: If True, use ``GraphSubprocVecEnv``; if False, use
             ``GraphDummyVecEnv``. Defaults to subprocess when ``n_envs > 1``.
         monitor_dir: Optional monitor output directory.
-        for_eval: Build eval envs (no reward normalization).
+        for_eval: Unused; kept for call-site compatibility.
 
     Returns:
         Vectorized environment preserving ``HeteroData`` graphs in observations.

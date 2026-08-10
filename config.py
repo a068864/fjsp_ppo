@@ -71,7 +71,6 @@ class EnvConfig:
     min_eligible_machines: int = 2
     cross_job_dep_prob: float = 0.6
     shared_dep_prob: float = 0.4
-    max_episode_steps: int = 500
 
     def __post_init__(self) -> None:
         self.validate()
@@ -92,7 +91,6 @@ class EnvConfig:
         _require_positive_int("n_jobs", self.n_jobs)
         _require_positive_int("avg_operations_per_job", self.avg_operations_per_job)
         _require_positive_int("max_operation_duration", self.max_operation_duration)
-        _require_positive_int("max_episode_steps", self.max_episode_steps)
         _require_positive_int("min_eligible_machines", self.min_eligible_machines)
         if self.min_eligible_machines > self.n_machines:
             raise ValueError(
@@ -294,7 +292,7 @@ class EvalConfig:
         self.model.validate()
 
 
-# Demo / smoke-test instance (EnvConfig field defaults): 5×3×4, max_episode_steps=500.
+# Demo / smoke-test instance (EnvConfig field defaults): 5×3×4.
 DEBUG_SCALE_ENV = EnvConfig()
 
 # Full-scale instance for later serious runs (switch get_default_* back to this).
@@ -302,7 +300,6 @@ FULL_SCALE_ENV = EnvConfig(
     n_machines=25,
     n_jobs=15,
     avg_operations_per_job=8,
-    max_episode_steps=2000,
 )
 
 
