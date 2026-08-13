@@ -204,14 +204,10 @@ class FJSPEnv(gym.Env):
         self.efficiency_modifiers = self._generate_efficiency_modifiers()
         self.eligibility_matrix = self._generate_eligibility_matrix()
 
-        # Add assignment tracking
-        self.assignment_history = []
-
         # Add time tracking
         self.current_time = 0.0
         self.makespan = float('inf')
 
-        self.machine_last_idle_time = torch.zeros(n_machines, device=self.device)
         self.last_success = False
         self._episode_steps = 0
         self._cached_action_mask: Optional[np.ndarray] = None
@@ -285,24 +281,22 @@ class FJSPEnv(gym.Env):
         Returns:
             Binary tensor indicating machine-operation eligibility
         """
-        eligibility = torch.zeros(
-            (self.n_operations, self.n_machines),
-            dtype=torch.bool,
-            device=self.device
+        n_ops, n_mach = self.n_operations, self.n_machines
+        scores = torch.rand(
+            (n_ops, n_mach), generator=self.torch_gen, device=self.device
         )
-
-        for op in range(self.n_operations):
-            machine_indices = torch.randperm(self.n_machines, generator=self.torch_gen, device=self.device)
-
-            # Ensure minimum eligible machines
-            for i in range(self.min_eligible_machines):
-                eligibility[op, machine_indices[i]] = True
-
-            # Randomly drop connections
-            for i in range(self.min_eligible_machines, self.n_machines):
-                if torch.rand(1, generator=self.torch_gen, device=self.device).item() > self.connection_drop_prob:
-                    eligibility[op, machine_indices[i]] = True
-
+        perm = torch.argsort(scores, dim=1)
+        eligibility = torch.zeros((n_ops, n_mach), dtype=torch.bool, device=self.device)
+        eligibility.scatter_(1, perm[:, : self.min_eligible_machines], True)
+        extra = n_mach - self.min_eligible_machines
+        if extra > 0:
+            keep = (
+                torch.rand(
+                    (n_ops, extra), generator=self.torch_gen, device=self.device
+                )
+                > self.connection_drop_prob
+            )
+            eligibility.scatter_(1, perm[:, self.min_eligible_machines :], keep)
         return eligibility
 
     def _calculate_eligible_machine_counts(self) -> torch.Tensor:
@@ -632,8 +626,6 @@ class FJSPEnv(gym.Env):
 
         self.current_time = 0.0
         self.makespan = float("inf")
-        self.assignment_history = []
-        self.machine_last_idle_time = torch.zeros(self.n_machines, device=self.device)
         self.last_success = False
         self._episode_steps = 0
         self._cached_action_mask = None
@@ -673,6 +665,7 @@ class FJSPEnv(gym.Env):
         # Define all possible edge types that could involve the operation
         edge_types = [
             ("machine", "processing", "operation"),
+            ("operation", "processed_by", "machine"),
             ("operation", "next", "operation"),
             ("operation", "precede", "operation"),
             ("operation", "compatible", "machine"),
@@ -869,44 +862,34 @@ class FJSPEnv(gym.Env):
             - blocked_machines: Number of machines with front operations that cannot be processed
         """
         processing = torch.zeros(self.n_operations, dtype=torch.bool, device=self.device)
-        blocked_machines = 0
-
-        edge_index = self.state['machine', 'processing', 'operation'].edge_index
+        edge_index = self.state["machine", "processing", "operation"].edge_index
         if edge_index.numel() == 0:
-            return processing, blocked_machines
+            return processing, 0
 
-        dep_edge_index = self.state['operation', 'precede', 'operation'].edge_index
+        machines = edge_index[0]
+        ops = edge_index[1]
+        n_edges = int(machines.numel())
+        order = torch.arange(n_edges, device=self.device)
+        first = torch.full(
+            (self.n_machines,), n_edges, dtype=torch.long, device=self.device
+        )
+        first.scatter_reduce_(0, machines.long(), order, reduce="amin")
+        busy = first < n_edges
+        if not bool(busy.any().item()):
+            return processing, 0
+        front_ops = ops[first[busy]]
 
-        op_features = self.state['operation'].x
+        finished = self.state["operation"].x[:, OP_FINISHED] == 1
+        prereq_ok = torch.ones(self.n_operations, dtype=torch.bool, device=self.device)
+        dep = self.state["operation", "precede", "operation"].edge_index
+        if dep.numel() > 0:
+            unfinished_pred = ~finished[dep[0]]
+            if bool(unfinished_pred.any().item()):
+                prereq_ok[dep[1][unfinished_pred]] = False
 
-        for machine in edge_index[0].unique():
-            # Get all operations in this machine's queue in order
-            machine_mask = edge_index[0] == machine
-            queue_ops = edge_index[1][machine_mask]
-
-            if len(queue_ops) == 0:
-                continue
-
-            # Check only the first operation in the queue
-            operation = queue_ops[0].item()
-
-            # Check requirements
-            can_process = True
-            if dep_edge_index.numel() > 0:
-                # Find prerequisites for this operation
-                prereqs_mask = dep_edge_index[1] == operation
-                if prereqs_mask.any():
-                    # Get operations this one depends on
-                    prerequisites = dep_edge_index[0][prereqs_mask]
-
-                    # Prerequisites must be finished, not merely scheduled.
-                    can_process = torch.all(op_features[prerequisites, OP_FINISHED] == 1)
-
-            if can_process:
-                processing[operation] = True
-            else:
-                blocked_machines += 1
-
+        can_process = prereq_ok[front_ops]
+        processing[front_ops] = can_process
+        blocked_machines = int((~can_process).sum().item())
         return processing, blocked_machines
 
     def _add_edge(self, edge_type: str, src: int, dst: int, edge_attr=None):
@@ -922,10 +905,15 @@ class FJSPEnv(gym.Env):
         # Determine the edge key based on type
         if edge_type == 'processing':
             key = ('machine', 'processing', 'operation')
+        elif edge_type == 'processed_by':
+            key = ('operation', 'processed_by', 'machine')
         elif edge_type in ['precede', 'next']:
             key = ('operation', edge_type, 'operation')
         else:
-            raise ValueError(f"Invalid edge type: {edge_type}. Expected 'processing', 'precede', or 'next'")
+            raise ValueError(
+                f"Invalid edge type: {edge_type}. Expected 'processing', "
+                "'processed_by', 'precede', or 'next'"
+            )
 
         edge = torch.tensor([[src], [dst]], dtype=torch.long, device=self.device)
 
@@ -959,8 +947,6 @@ class FJSPEnv(gym.Env):
         # Verify machine eligibility
         assert self.eligibility_matrix[operation, machine], f"Machine {machine} is not eligible for operation {operation}"
 
-        self.assignment_history.append((machine, operation))
-
         proc_edges = self.state['machine', 'processing', 'operation'].edge_index
 
         # If machine has existing operations, add 'next' edge from last operation to this one
@@ -979,6 +965,7 @@ class FJSPEnv(gym.Env):
         edge_attr = torch.tensor([[efficiency_modifier.item()]], dtype=torch.float32, device=self.device)
 
         self._add_edge('processing', machine, operation, edge_attr)
+        self._add_edge('processed_by', operation, machine, edge_attr)
 
         base_time = self.state['operation'].x[operation, 0]
         adjusted_time = base_time * efficiency_modifier

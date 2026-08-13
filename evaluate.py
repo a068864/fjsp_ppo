@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from config import EvalConfig, get_default_eval_config
+from config import EvalConfig, get_default_eval_config, get_full_scale_eval_config
 from models.graph_ppo import GraphPPO
 from models.sb3_policy import GraphActorCriticPolicy
 from training.eval_cli import (
@@ -171,7 +171,12 @@ def evaluate(cfg: Optional[EvalConfig] = None, args: Optional[argparse.Namespace
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI entry point."""
     args = parse_args(argv)
-    evaluate(get_default_eval_config(), args)
+    cfg = (
+        get_full_scale_eval_config()
+        if getattr(args, "full_scale", False)
+        else get_default_eval_config()
+    )
+    evaluate(cfg, args)
     return 0
 
 

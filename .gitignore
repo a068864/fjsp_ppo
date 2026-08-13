@@ -31,6 +31,7 @@ experiments/
 *.zip
 *.log
 events.out.tfevents.*
+/PPO_*/
 
 # Brainstorm / superpowers session artifacts
 .superpowers/

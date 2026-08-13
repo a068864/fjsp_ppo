@@ -103,7 +103,7 @@ class GraphActorCritic(nn.Module):
         """Build an (n_ops, n_machines) efficiency matrix from compatible edges."""
         n_ops = int(data["operation"].x.size(0))
         n_mach = int(data["machine"].x.size(0))
-        mat = torch.ones((n_ops, n_mach), dtype=torch.float32, device=device)
+        mat = torch.zeros((n_ops, n_mach), dtype=torch.float32, device=device)
         key = ("operation", "compatible", "machine")
         if key not in data.edge_types:
             return mat
@@ -220,14 +220,14 @@ class GraphActorCritic(nn.Module):
             raise ValueError("Empty graph batch")
 
         device = next(self.parameters()).device
-        # Always encode graphs independently. Batched PyG collation changes
-        # node embeddings (and thus action log-probs) with minibatch composition,
-        # which breaks PPO importance sampling (old_log_prob vs evaluate_actions).
+        # Same-size graphs collate without changing embeddings (encode_batch
+        # splits on ptr). Mixed sizes fall back to per-graph forwards.
+        machine_list, operation_list, graph_emb_batch = self.encoder.encode_batch(graphs)
         logits_list: List[torch.Tensor] = []
-        values_list: List[torch.Tensor] = []
         n_actions: Optional[int] = None
-        for graph in graphs:
-            logits_i, value_i = self.forward_single(graph, None)
+        for i, graph in enumerate(graphs):
+            efficiency = self.efficiency_matrix(graph, device=device)
+            logits_i = self.actor(machine_list[i], operation_list[i], efficiency)
             if n_actions is None:
                 n_actions = int(logits_i.numel())
             elif int(logits_i.numel()) != n_actions:
@@ -236,10 +236,9 @@ class GraphActorCritic(nn.Module):
                     f"got {logits_i.numel()} vs {n_actions}"
                 )
             logits_list.append(logits_i)
-            values_list.append(value_i)
 
         assert n_actions is not None
-        values = torch.stack(values_list, dim=0)
+        values = self.critic(graph_emb_batch).squeeze(-1)
         masks = self._as_mask_list(action_mask, batch_size, n_actions, device)
         masked = [
             self.apply_action_mask(logits, None if masks is None else masks[i])
@@ -264,15 +263,11 @@ class GraphActorCritic(nn.Module):
         graphs = self._as_graph_list(data)
         if not graphs:
             raise ValueError("Empty graph batch")
-        # Independent encodes — same invariance requirement as forward().
-        values = []
-        for graph in graphs:
-            _m, _o, graph_emb = self.encoder(graph)
-            values.append(self.critic(graph_emb).squeeze(-1))
-        stacked = torch.stack(values, dim=0)
+        _m, _o, graph_emb_batch = self.encoder.encode_batch(graphs)
+        values = self.critic(graph_emb_batch).squeeze(-1)
         if len(graphs) == 1:
-            return stacked.squeeze(0)
-        return stacked
+            return values.squeeze(0)
+        return values
 
 
 __all__ = ["MASK_LOGIT", "GraphActorCritic"]

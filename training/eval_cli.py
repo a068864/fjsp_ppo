@@ -19,6 +19,11 @@ def add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         dest="avg_operations_per_job",
     )
+    parser.add_argument(
+        "--full-scale",
+        action="store_true",
+        help="Use FULL_SCALE_ENV (25x15x8) and matching model dims",
+    )
 
 
 def apply_shared_eval_args(cfg: EvalConfig, args: argparse.Namespace) -> EvalConfig:

@@ -10,6 +10,8 @@ from config import (
     TrainConfig,
     get_default_eval_config,
     get_default_train_config,
+    get_full_scale_eval_config,
+    get_full_scale_train_config,
 )
 from train import apply_args
 from training.eval_cli import apply_shared_eval_args
@@ -64,6 +66,21 @@ def test_default_configs_are_valid_and_ppo_batches_divide_rollout():
 def test_device_strings_are_accepted(device):
     TrainConfig(device=device).validate()
     EvalConfig(device=device).validate()
+
+
+def test_full_scale_train_config_geometry_and_batching():
+    cfg = get_full_scale_train_config()
+    cfg.validate()
+    assert cfg.env.n_machines == 25
+    assert cfg.env.n_jobs == 15
+    assert cfg.env.avg_operations_per_job == 8
+    assert cfg.model.hidden_dim == 128
+    assert cfg.model.num_heads == 4
+    assert (cfg.ppo.n_steps * cfg.n_envs) % cfg.ppo.batch_size == 0
+    eval_cfg = get_full_scale_eval_config()
+    eval_cfg.validate()
+    assert eval_cfg.env.n_machines == 25
+    assert eval_cfg.model.hidden_dim == cfg.model.hidden_dim
 
 
 def test_train_config_rejects_partial_ppo_minibatch():

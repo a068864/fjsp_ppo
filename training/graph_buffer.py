@@ -15,23 +15,26 @@ from torch_geometric.data import HeteroData
 GRAPH_KEY = "graph"
 
 
-def slim_graph_for_policy(graph: HeteroData) -> HeteroData:
+def slim_graph_for_policy(graph: HeteroData, *, clone: bool = True) -> HeteroData:
     """Retain only tensors consumed by the policy encoder / efficiency scoring."""
     from models.graph_encoder import EDGE_TYPES
 
+    def _copy(tensor: th.Tensor) -> th.Tensor:
+        return tensor.clone() if clone else tensor
+
     out = HeteroData()
-    out["operation"].x = graph["operation"].x.clone()
-    out["machine"].x = graph["machine"].x.clone()
+    out["operation"].x = _copy(graph["operation"].x)
+    out["machine"].x = _copy(graph["machine"].x)
     for edge_type in EDGE_TYPES:
         if edge_type not in graph.edge_types:
             continue
         edge_index = graph[edge_type].edge_index
         if edge_index is None or edge_index.numel() == 0:
             continue
-        out[edge_type].edge_index = edge_index.clone()
+        out[edge_type].edge_index = _copy(edge_index)
         edge_attr = getattr(graph[edge_type], "edge_attr", None)
         if edge_attr is not None:
-            out[edge_type].edge_attr = edge_attr.clone()
+            out[edge_type].edge_attr = _copy(edge_attr)
     return out
 
 
@@ -114,7 +117,7 @@ class GraphDictRolloutBuffer(DictRolloutBuffer):
                 else:
                     iterable = list(graphs)
                 for i, graph in enumerate(iterable):
-                    arr[i] = slim_graph_for_policy(graph) if graph is not None else graph
+                    arr[i] = slim_graph_for_policy(graph, clone=False) if graph is not None else graph
                 self.observations[key][self.pos] = arr
                 continue
 

@@ -19,9 +19,38 @@ CHECKPOINT_META_SUFFIX = ".meta.json"
 BEST_SCORE_NAME = "best_score.json"
 
 
+def material_config(config: Mapping[str, Any]) -> Dict[str, Any]:
+    """Subset of config that must match to load a checkpoint into a trainer."""
+    cfg = dict(config)
+    ppo = dict(cfg.get("ppo") or {})
+    ppo_keys = (
+        "n_steps",
+        "batch_size",
+        "n_epochs",
+        "gamma",
+        "gae_lambda",
+        "clip_range",
+        "ent_coef",
+        "vf_coef",
+        "max_grad_norm",
+        "target_kl",
+    )
+    return {
+        "env": dict(cfg.get("env") or {}),
+        "model": dict(cfg.get("model") or {}),
+        "n_envs": cfg.get("n_envs"),
+        "ppo": {key: ppo[key] for key in ppo_keys if key in ppo},
+    }
+
+
 def config_fingerprint(config: Mapping[str, Any]) -> str:
-    """Stable SHA-256 fingerprint of a nested config mapping."""
-    payload = json.dumps(config, sort_keys=True, separators=(",", ":"), default=str)
+    """Stable SHA-256 fingerprint of architecture / batch-geometry fields."""
+    payload = json.dumps(
+        material_config(config),
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -179,6 +208,7 @@ __all__ = [
     "config_fingerprint",
     "load_best_score",
     "load_best_score_record",
+    "material_config",
     "meta_path_for",
     "read_checkpoint_metadata",
     "save_best_score",

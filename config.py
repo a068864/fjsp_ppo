@@ -351,7 +351,21 @@ def get_default_train_config() -> TrainConfig:
     return TrainConfig(env=replace(FULL_SCALE_ENV))
 
 
+def get_full_scale_train_config() -> TrainConfig:
+    """Serious-run config: 25×15×8 instance and default model/PPO sizes."""
+    return TrainConfig(
+        n_envs=8,
+        env=replace(FULL_SCALE_ENV),
+    )
+
+
 def get_default_eval_config() -> EvalConfig:
     """Return the default evaluation configuration (full-scale)."""
     cfg = get_default_train_config()
+    return EvalConfig(env=replace(cfg.env), model=replace(cfg.model))
+
+
+def get_full_scale_eval_config() -> EvalConfig:
+    """Evaluation config matching ``get_full_scale_train_config()``."""
+    cfg = get_full_scale_train_config()
     return EvalConfig(env=replace(cfg.env), model=replace(cfg.model))

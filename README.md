@@ -11,7 +11,12 @@ The environment state is a PyTorch Geometric `HeteroData` graph. A custom SB3 po
 
 **Supported Python:** 3.10–3.13.
 
-Default training/eval is **demo-scale** (`DEBUG_SCALE_ENV`: `5` machines × `3` jobs × `4` avg ops, short PPO run) so training can be verified quickly. Switch `get_default_train_config()` / `get_default_eval_config()` to `FULL_SCALE_ENV` (`25×15×8`) when ready for a serious run.
+Default training/eval is **demo-scale** (`DEBUG_SCALE_ENV`: `5` machines × `3` jobs × `4` avg ops, short PPO run) so training can be verified quickly. For a serious run, pass `--full-scale` (`FULL_SCALE_ENV` `25×15×8` plus default model/PPO sizes). Measure FPS / RSS / GPU first:
+
+```bash
+python benchmark.py
+python benchmark.py --full-scale --n-env-steps 64 --dummy-vec
+```
 
 ---
 
@@ -109,6 +114,11 @@ python train.py --device mps --seed 123
 
 # Larger instance
 python train.py --n-machines 10 --n-jobs 8 --avg-ops 6
+
+# Full-scale instance (25×15×8) + default model/PPO sizes
+python train.py --full-scale
+python evaluate.py --full-scale --trust-checkpoint
+python baseline_random.py --full-scale
 ```
 
 All hyperparameters live in `config.py` (`TrainConfig`, `EnvConfig`, `ModelConfig`, `PPOConfig`).
@@ -132,7 +142,7 @@ Each `step()` assigns one operation, then advances simulated time by a fixed `ti
 | n_steps             | 256        |
 | batch_size          | 64         |
 | n_epochs            | 4          |
-| total_timesteps     | 8192       |
+| total_timesteps     | 32768      |
 | resume              | False      |
 | tensorboard_log     | `./logs`   |
 
@@ -201,6 +211,17 @@ Demo-scale instances are the intended target; larger instances may need `--time-
 
 ---
 
+## Rollout baseline
+
+Times `policy.predict` + `env.step` and reports FPS, process RSS, CUDA allocation, and GPU util (nvidia-smi when present). Demo-scale stays the train default; use this before `--full-scale`.
+
+```bash
+python benchmark.py --n-env-steps 64
+python benchmark.py --full-scale --n-env-steps 64 --device cuda
+```
+
+---
+
 ## TensorBoard
 
 ```bash
@@ -237,6 +258,7 @@ fjsp_ppo/
   baseline_random.py       # Uniform random valid-action baseline
   baseline_heuristic.py    # Classic dispatching-rule baselines
   baseline_milp.py         # Exact makespan MILP (PuLP+CBC)
+  benchmark.py             # FPS / RSS / GPU baseline
   config.py                # All hyperparameters + validation
   callbacks.py             # Checkpoint / eval / TB / LR callbacks
   monitor.py               # Episode statistics (append-safe CSV)
@@ -262,6 +284,7 @@ fjsp_ppo/
     eval_cli.py            # Shared evaluate/baseline CLI helpers
     graph_buffer.py        # Object-safe rollout buffer for graphs
     checkpoints.py         # Atomic metadata-backed checkpoint helpers
+    benchmark.py           # Rollout FPS / RSS / GPU snapshot
   logs/
   checkpoints/
   tests/

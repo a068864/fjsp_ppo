@@ -513,7 +513,7 @@ def _aggregate_eval(
 ) -> EvalResult:
     n_success = int(sum(1 for s in episode_successes if s > 0.5))
     n_timeout = int(sum(1 for t in episode_timeouts if t > 0.5))
-    n_failure = int(len(episode_successes) - n_success)
+    n_failure = max(0, int(len(episode_successes) - n_success - n_timeout))
     # Label makespan as successful-episode makespan.
     success_makespans = [
         m

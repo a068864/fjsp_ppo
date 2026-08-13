@@ -179,6 +179,9 @@ class GraphDummyVecEnv(VecEnv):
             self.buf_infos.copy(),
         )
 
+    def render(self):
+        return None
+
     def close(self) -> None:
         for env in self.envs:
             env.close()

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from callbacks import build_callbacks, make_lr_schedule
-from config import TrainConfig, get_default_train_config
+from config import TrainConfig, get_default_train_config, get_full_scale_train_config
 from models.graph_ppo import GraphPPO
 from models.sb3_policy import GraphActorCriticPolicy, make_policy_kwargs
 from training.graph_buffer import GraphDictRolloutBuffer
@@ -69,6 +69,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--n-jobs", type=int, default=None)
     parser.add_argument("--avg-ops", type=int, default=None, dest="avg_operations_per_job")
+    parser.add_argument(
+        "--full-scale",
+        action="store_true",
+        help="Use FULL_SCALE_ENV (25x15x8) and default model/PPO sizes (demo-scale remains the default)",
+    )
     return parser.parse_args(argv)
 
 
@@ -252,7 +257,12 @@ def train(cfg: Optional[TrainConfig] = None, args: Optional[argparse.Namespace] 
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI entry point."""
     args = parse_args(argv)
-    train(get_default_train_config(), args)
+    cfg = (
+        get_full_scale_train_config()
+        if args.full_scale
+        else get_default_train_config()
+    )
+    train(cfg, args)
     return 0
 
 

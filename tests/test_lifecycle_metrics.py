@@ -18,7 +18,7 @@ def test_monitor_appends_without_truncating_history(tmp_path: Path):
     env = FJSPEnv(n_machines=2, n_jobs=2, avg_operations_per_job=2, seed=0, device="cpu")
     mon = FJSPMonitor(env, filename=path, allow_early_resets=True)
     mon.reset(seed=0)
-    mask = mon.get_action_mask() if hasattr(mon, "get_action_mask") else env.get_action_mask()
+    mask = mon.unwrapped.get_action_mask()
     # Write one episode row then reopen append-mode monitor.
     action = int(np.flatnonzero(mask)[0])
     for _ in range(3):

@@ -78,15 +78,17 @@ class HeteroResidualBlock(nn.Module):
         edge_attr_dict: Dict[Tuple[str, str, str], torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
         residual = {key: value for key, value in x_dict.items()}
+        # Keep empty (2, 0) indices. Dropping them makes sequential encoding skip
+        # a TransformerConv, while a collated batch still runs it (other graphs
+        # have the type) and add_self_loops fires on every node — PPO collect vs
+        # train KL.
         filtered_edges = {
             edge_type: edge_index
             for edge_type, edge_index in edge_index_dict.items()
             if edge_type in self.conv.convs
             and edge_index is not None
-            and edge_index.numel() > 0
             and edge_index.dim() == 2
             and edge_index.size(0) == 2
-            and edge_index.size(1) > 0
         }
 
         if filtered_edges:
@@ -242,31 +244,36 @@ class GraphEncoder(nn.Module):
         Dict[Tuple[str, str, str], torch.Tensor],
         Dict[Tuple[str, str, str], torch.Tensor],
     ]:
+        device = data["operation"].x.device
         edge_index_dict: Dict[Tuple[str, str, str], torch.Tensor] = {}
         edge_attr_dict: Dict[Tuple[str, str, str], torch.Tensor] = {}
         for edge_type in EDGE_TYPES:
+            edge_index = None
             if edge_type in data.edge_types:
                 edge_index = data[edge_type].edge_index
-                if edge_index is not None and edge_index.numel() > 0:
-                    edge_attr = getattr(data[edge_type], "edge_attr", None)
-                    if edge_attr is None:
-                        edge_attr = torch.zeros(
-                            (edge_index.size(1), 1),
-                            dtype=torch.float32,
-                            device=edge_index.device,
+            if edge_index is None or edge_index.numel() == 0:
+                edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+                edge_attr = torch.zeros((0, 1), dtype=torch.float32, device=device)
+            else:
+                edge_attr = getattr(data[edge_type], "edge_attr", None)
+                if edge_attr is None:
+                    edge_attr = torch.zeros(
+                        (edge_index.size(1), 1),
+                        dtype=torch.float32,
+                        device=edge_index.device,
+                    )
+                else:
+                    edge_attr = edge_attr.float().reshape(edge_index.size(1), -1)
+                    if edge_attr.size(1) != 1:
+                        raise ValueError(
+                            f"{edge_type} edge_attr must have one feature, "
+                            f"got {edge_attr.size(1)}"
                         )
-                    else:
-                        edge_attr = edge_attr.float().reshape(edge_index.size(1), -1)
-                        if edge_attr.size(1) != 1:
-                            raise ValueError(
-                                f"{edge_type} edge_attr must have one feature, "
-                                f"got {edge_attr.size(1)}"
-                            )
-                    edge_index_dict[edge_type] = edge_index
-                    edge_attr_dict[edge_type] = edge_attr
-                    reverse_type = REVERSE_EDGE_TYPES[edge_type]
-                    edge_index_dict[reverse_type] = edge_index.flip(0)
-                    edge_attr_dict[reverse_type] = edge_attr
+            edge_index_dict[edge_type] = edge_index
+            edge_attr_dict[edge_type] = edge_attr
+            reverse_type = REVERSE_EDGE_TYPES[edge_type]
+            edge_index_dict[reverse_type] = edge_index.flip(0)
+            edge_attr_dict[reverse_type] = edge_attr
         return edge_index_dict, edge_attr_dict
 
     def _encode_x_dict(
@@ -300,16 +307,30 @@ class GraphEncoder(nn.Module):
         view = HeteroData()
         view["operation"].x = data["operation"].x
         view["machine"].x = data["machine"].x
+        device = data["operation"].x.device
         for edge_type in EDGE_TYPES:
-            if edge_type not in data.edge_types:
-                continue
-            edge_index = data[edge_type].edge_index
+            edge_index = None
+            edge_attr = None
+            if edge_type in data.edge_types:
+                edge_index = data[edge_type].edge_index
+                edge_attr = getattr(data[edge_type], "edge_attr", None)
             if edge_index is None or edge_index.numel() == 0:
-                continue
-            view[edge_type].edge_index = edge_index
-            edge_attr = getattr(data[edge_type], "edge_attr", None)
-            if edge_attr is not None:
-                view[edge_type].edge_attr = edge_attr
+                view[edge_type].edge_index = torch.empty(
+                    (2, 0), dtype=torch.long, device=device
+                )
+                view[edge_type].edge_attr = torch.zeros(
+                    (0, 1), dtype=torch.float32, device=device
+                )
+            else:
+                view[edge_type].edge_index = edge_index
+                if edge_attr is None:
+                    view[edge_type].edge_attr = torch.zeros(
+                        (edge_index.size(1), 1),
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                else:
+                    view[edge_type].edge_attr = edge_attr
         return view
 
     def forward(
