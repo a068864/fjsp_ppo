@@ -11,6 +11,12 @@ def test_parse_args_full_scale_flag():
     assert parse_args([]).full_scale is False
 
 
+def test_parse_args_debug_flag():
+    args = parse_args(["--debug"])
+    assert args.debug is True
+    assert parse_args([]).debug is False
+
+
 def test_process_rss_bytes_is_positive():
     from training.benchmark import process_rss_bytes
 

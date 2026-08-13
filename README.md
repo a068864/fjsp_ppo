@@ -11,7 +11,7 @@ The environment state is a PyTorch Geometric `HeteroData` graph. A custom SB3 po
 
 **Supported Python:** 3.10–3.13.
 
-Default training/eval is **demo-scale** (`DEBUG_SCALE_ENV`: `5` machines × `3` jobs × `4` avg ops, short PPO run) so training can be verified quickly. For a serious run, pass `--full-scale` (`FULL_SCALE_ENV` `25×15×8` plus default model/PPO sizes). Measure FPS / RSS / GPU first:
+Default training/eval is **demo-scale** (`DEBUG_SCALE_ENV`: `5` machines × `3` jobs × `4` avg ops, short PPO run) so training can be verified quickly. For a serious run, pass `--full-scale` (`FULL_SCALE_ENV` `25×15×8` plus large model/PPO sizes). Measure FPS / RSS / GPU first:
 
 ```bash
 python benchmark.py
@@ -91,7 +91,9 @@ From the project root (`fjsp_ppo/`):
 python train.py
 ```
 
-Training **starts fresh by default** (`resume=False`). To continue from a trusted local checkpoint:
+Training **starts fresh by default** (`resume=False`) on the **demo-scale** instance (`5×3×4`, 65k steps). Pass `--full-scale` for `25×15×8` + 1M steps.
+
+To continue from a trusted local checkpoint:
 
 ```bash
 python train.py --resume --trust-checkpoint
@@ -105,6 +107,9 @@ Useful overrides:
 # Fewer parallel envs / shorter smoke run
 python train.py --n-envs 2 --dummy-vec --total-timesteps 8192
 
+# Explicit demo-scale (same as the default)
+python train.py --debug --dummy-vec
+
 # Documented parallel presets
 python train.py --n-envs 8
 
@@ -115,7 +120,7 @@ python train.py --device mps --seed 123
 # Larger instance
 python train.py --n-machines 10 --n-jobs 8 --avg-ops 6
 
-# Full-scale instance (25×15×8) + default model/PPO sizes
+# Full-scale instance (25×15×8) + large model/PPO sizes
 python train.py --full-scale
 python evaluate.py --full-scale --trust-checkpoint
 python baseline_random.py --full-scale
@@ -129,7 +134,7 @@ All hyperparameters live in `config.py` (`TrainConfig`, `EnvConfig`, `ModelConfi
 
 Each `step()` assigns one operation, then advances simulated time by a fixed `time_step`. Only actual processed work is subtracted from remaining durations / machine workload; unused fractional tick capacity is **not** transferred to the next queued operation in the same tick. Terminal `rollout()` uses the same tick routine.
 
-### Demo defaults (`get_debug_train_config()`)
+### Default / demo config (`get_default_train_config()` / `get_debug_train_config()`)
 
 | Hyperparameter      | Value      |
 |---------------------|------------|
@@ -141,8 +146,10 @@ Each `step()` assigns one operation, then advances simulated time by a fixed `ti
 | dropout             | 0.0 (required) |
 | n_steps             | 256        |
 | batch_size          | 64         |
-| n_epochs            | 4          |
-| total_timesteps     | 32768      |
+| n_epochs            | 8          |
+| ent_coef            | 0.01       |
+| gae_lambda          | 1.0        |
+| total_timesteps     | 65536      |
 | resume              | False      |
 | tensorboard_log     | `./logs`   |
 

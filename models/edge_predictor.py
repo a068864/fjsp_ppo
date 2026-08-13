@@ -24,7 +24,9 @@ class EdgePredictor(nn.Module):
     (row-major over machines, columns over operations).
 
     Optional efficiency matrices (ops×machines or batched B×ops×machines) are
-    added as a learned bias so compatibility attributes affect pair scores.
+    added as a learned bias. Callers pass ECT-style scores (higher = better;
+    typically ``-expected_completion / mean_duration``) so slower or more
+    loaded machines are down-ranked.
     """
 
     def __init__(self, hidden_dim: int, predictor_type: PredictorType = "dot_product") -> None:
@@ -179,6 +181,7 @@ class EdgePredictor(nn.Module):
 
     def reset_parameters(self) -> None:
         """Reset parameters using Kaiming initialization for GELU activations."""
+        # ECT residual prior; 1.0 matches score units of -ECT/mean_duration.
         nn.init.constant_(self.efficiency_scale, 1.0)
         if self.predictor_type == "bilinear":
             # Start as identity so init logits match scaled dot-product;

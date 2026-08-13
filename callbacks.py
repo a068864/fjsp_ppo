@@ -269,6 +269,9 @@ class FJSPEvalCallback(BaseCallback):
             if self.best_callback.metric == "mean_makespan"
             else result.mean_reward
         )
+        # Heuristics are 100% success; don't crown a partial-success makespan.
+        if self.best_callback.metric == "mean_makespan" and result.success_rate < 1.0:
+            score = float("inf")
         self.best_callback.update(score)
 
         if self.logger is not None:

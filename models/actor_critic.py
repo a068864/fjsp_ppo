@@ -118,6 +118,25 @@ class GraphActorCritic(nn.Module):
         return mat
 
     @staticmethod
+    def dispatch_score_matrix(
+        data: HeteroData,
+        efficiency: torch.Tensor,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """ECT-style pair scores (ops×machines); higher is better.
+
+        Env efficiency is a processing-time multiplier (higher = slower), so
+        expected completion is ``machine_workload + duration * efficiency``.
+        """
+        duration = data["operation"].x[:, 0].to(device=device, dtype=torch.float32)
+        workload = data["machine"].x[:, 1].to(device=device, dtype=torch.float32)
+        eff = efficiency.to(device=device, dtype=torch.float32)
+        proc = duration.unsqueeze(1) * eff
+        ect = workload.unsqueeze(0) + proc
+        scale = duration.mean().clamp(min=1.0)
+        return -ect / scale
+
+    @staticmethod
     def _as_mask_list(
         action_mask: MaskInput,
         batch_size: int,
@@ -193,7 +212,8 @@ class GraphActorCritic(nn.Module):
         device = next(self.parameters()).device
         machine_emb, operation_emb, graph_emb = self.encoder(data)
         efficiency = self.efficiency_matrix(data, device=device)
-        logits = self.actor(machine_emb, operation_emb, efficiency)
+        dispatch = self.dispatch_score_matrix(data, efficiency, device=device)
+        logits = self.actor(machine_emb, operation_emb, dispatch)
         logits = self.apply_action_mask(logits, action_mask)
         value = self.critic(graph_emb).squeeze(-1)
         return logits, value
@@ -227,7 +247,8 @@ class GraphActorCritic(nn.Module):
         n_actions: Optional[int] = None
         for i, graph in enumerate(graphs):
             efficiency = self.efficiency_matrix(graph, device=device)
-            logits_i = self.actor(machine_list[i], operation_list[i], efficiency)
+            dispatch = self.dispatch_score_matrix(graph, efficiency, device=device)
+            logits_i = self.actor(machine_list[i], operation_list[i], dispatch)
             if n_actions is None:
                 n_actions = int(logits_i.numel())
             elif int(logits_i.numel()) != n_actions:

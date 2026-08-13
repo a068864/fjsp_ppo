@@ -159,12 +159,12 @@ class PPOConfig:
 
     learning_rate: float = 1e-4
     gamma: float = 1.0
-    gae_lambda: float = 0.95
+    gae_lambda: float = 1.0  # undiscounted finite-horizon makespan; λ<1 hides early assignments
     clip_range: float = 0.2
     n_steps: int = 2048
     batch_size: int = 128
     n_epochs: int = 4
-    ent_coef: float = 0.05
+    ent_coef: float = 0.01
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     total_timesteps: int = 1_000_000
@@ -321,7 +321,7 @@ def get_debug_train_config() -> TrainConfig:
         n_envs=2,
         checkpoint_freq_updates=4,
         eval_freq_updates=4,
-        n_eval_episodes=5,
+        n_eval_episodes=10,
         lr_schedule="linear",
         lr_end_fraction=0.2,
         env=replace(DEBUG_SCALE_ENV),
@@ -334,21 +334,22 @@ def get_debug_train_config() -> TrainConfig:
         ppo=PPOConfig(
             learning_rate=1e-4,
             gamma=1.0,
+            gae_lambda=1.0,
             clip_range=0.2,
             n_steps=256,
             batch_size=64,
-            n_epochs=4,
-            ent_coef=0.05,
+            n_epochs=8,
+            ent_coef=0.01,
             vf_coef=0.5,
             target_kl=0.05,
-            total_timesteps=32_768,
+            total_timesteps=65_536,
         ),
     )
 
 
 def get_default_train_config() -> TrainConfig:
-    """Return the default training configuration (full-scale)."""
-    return TrainConfig(env=replace(FULL_SCALE_ENV))
+    """Return the default training configuration (demo-scale 5×3×4)."""
+    return get_debug_train_config()
 
 
 def get_full_scale_train_config() -> TrainConfig:
@@ -360,7 +361,7 @@ def get_full_scale_train_config() -> TrainConfig:
 
 
 def get_default_eval_config() -> EvalConfig:
-    """Return the default evaluation configuration (full-scale)."""
+    """Return the default evaluation configuration (demo-scale 5×3×4)."""
     cfg = get_default_train_config()
     return EvalConfig(env=replace(cfg.env), model=replace(cfg.model))
 

@@ -987,6 +987,26 @@ class FJSPEnv(gym.Env):
         """Get the efficiency modifier for an operation-machine pair."""
         return self.efficiency_modifiers[operation, machine].item()
 
+    def estimated_completion(self) -> float:
+        """Lower bound on makespan: clock plus remaining queued machine work."""
+        if self.state is None:
+            return float(self.current_time)
+        workload = self.state["machine"].x[:, 1]
+        max_wl = float(workload.max().item()) if workload.numel() else 0.0
+        return float(self.current_time) + max_wl
+
+    def failure_penalty(self) -> float:
+        """Return worse than serial processing at max duration and slowdown."""
+        return (
+            float(self.time_penalty)
+            * float(self.n_operations)
+            * float(self.max_operation_duration)
+            * 4.0
+        )
+
+    def _completion_delta_reward(self, before: float, after: float) -> float:
+        return float(self.time_penalty) * (float(after) - float(before))
+
     def _advance_time_tick(self) -> List[int]:
         """Advance simulation by one fixed ``time_step`` and complete finished ops.
 
@@ -1116,25 +1136,29 @@ class FJSPEnv(gym.Env):
             )
         self._episode_steps += 1
 
+        before = self.estimated_completion()
         self.schedule_operation(machine, operation)
 
         processing_ops, blocked_machines = self._get_processing_operations()
         if self._is_gridlock(processing_ops, blocked_machines):
             # Still advance the clock so makespan/time stay consistent, then terminate.
             self.current_time += float(self.time_step)
+            reward = self._completion_delta_reward(before, self.estimated_completion())
+            reward += self.failure_penalty()
             self.last_success = False
             self.makespan = float("inf")
             obs = self._get_obs()
             info = self._get_info(success=False)
             info["is_gridlock"] = True
-            return obs, float(self.time_penalty), True, False, info
+            return obs, float(reward), True, False, info
 
         self._advance_time_tick()
-        reward = self.time_penalty
+        reward = self._completion_delta_reward(before, self.estimated_completion())
 
         # Detect gridlock after the tick (e.g. newly blocked fronts).
         processing_ops, blocked_machines = self._get_processing_operations()
         if self._is_gridlock(processing_ops, blocked_machines):
+            reward += self.failure_penalty()
             self.last_success = False
             self.makespan = float("inf")
             obs = self._get_obs()
@@ -1147,6 +1171,8 @@ class FJSPEnv(gym.Env):
             reward += r
             if success:
                 self.makespan = self.current_time
+            else:
+                reward += self.failure_penalty()
             self.last_success = bool(success)
             obs = self._get_obs()
             info = self._get_info(success=bool(success), action_mask=obs["action_mask"])
@@ -1160,7 +1186,7 @@ class FJSPEnv(gym.Env):
             processing_ops, blocked_machines = self._get_processing_operations()
             if self._is_gridlock(processing_ops, blocked_machines):
                 info["is_gridlock"] = True
-            return obs, float(reward), True, False, info
+            return obs, float(reward + self.failure_penalty()), True, False, info
         return obs, float(reward), False, False, info
 
     def rollout(self) -> Tuple[float, bool]:
@@ -1189,8 +1215,9 @@ class FJSPEnv(gym.Env):
             if not processing_ops.any():
                 return reward, False
 
+            before = self.estimated_completion()
             self._advance_time_tick()
-            reward += float(self.time_penalty)
+            reward += self._completion_delta_reward(before, self.estimated_completion())
             guard += 1
             if guard > max_ticks:
                 return reward, False
