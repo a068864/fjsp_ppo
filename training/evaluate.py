@@ -123,12 +123,6 @@ def evaluate_policy_fjsp(
     running_lengths = np.zeros(n_envs, dtype=np.int64)
 
     observations = env.reset()
-    logger.info(
-        "Starting evaluation: n_episodes=%d deterministic=%s n_envs=%d",
-        n_episodes,
-        deterministic,
-        n_envs,
-    )
 
     while len(episode_rewards) < n_episodes:
         mask = observations.get("action_mask") if isinstance(observations, dict) else None
@@ -189,7 +183,6 @@ def evaluate_policy_fjsp(
         episode_timeouts,
         inference_times,
     )
-    logger.info("Evaluation finished:\n%s", result.format_summary())
     return result
 
 
