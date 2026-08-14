@@ -9,14 +9,14 @@ from gymnasium import spaces
 from torch_geometric.data import HeteroData
 
 from config import ModelConfig
-from envs.fjsp_env import FJSPEnv
+from envs.fjsp_env import FJSPEnv, OP_FEATURE_DIM
 from models.actor_critic import GraphActorCritic
 from models.sb3_policy import GraphActorCriticPolicy
 
 
 def _tiny_graph(n_machines: int = 2, n_ops: int = 2, efficiency: float = 1.0) -> HeteroData:
     g = HeteroData()
-    g["operation"].x = torch.zeros((n_ops, 14), dtype=torch.float32)
+    g["operation"].x = torch.zeros((n_ops, OP_FEATURE_DIM), dtype=torch.float32)
     g["operation"].x[:, 0] = 4.0
     g["machine"].x = torch.zeros((n_machines, 3), dtype=torch.float32)
     # One compatible edge per (op, machine) with efficiency attr.

@@ -20,7 +20,7 @@ def _reference_valid_actions(env: FJSPEnv) -> set[int]:
         if dep.numel() > 0:
             prereqs = dep[0][dep[1] == op]
             for p in prereqs.tolist():
-                if float(op_x[p, 5:8].sum()) == 0.0:
+                if float(op_x[p, OP_SCHEDULED : OP_FINISHED + 1].sum()) == 0.0:
                     ok = False
                     break
         if ok:

@@ -64,7 +64,7 @@ def test_best_callback_ignores_score_from_mismatched_checkpoint(tmp_path: Path):
     cb = BestModelCallback(
         zip_path,
         metric="mean_makespan",
-        config={"model": {"operation_in_dim": 14}},
+        config={"model": {"operation_in_dim": 12}},
     )
     cb.load_persisted_best(tmp_path)
     assert cb.best_score == pytest.approx(np.inf)

@@ -13,6 +13,7 @@ from config import (
     get_full_scale_eval_config,
     get_full_scale_train_config,
 )
+from envs.fjsp_env import MACH_FEATURE_DIM, OP_FEATURE_DIM
 from train import apply_args
 from training.eval_cli import apply_shared_eval_args
 
@@ -62,7 +63,8 @@ def test_default_configs_are_valid_and_ppo_batches_divide_rollout():
     assert train_cfg.env.avg_operations_per_job == 4
     assert train_cfg.model.hidden_dim == 64
     assert train_cfg.model.num_layers == 2
-    assert train_cfg.model.operation_in_dim == 14
+    assert train_cfg.model.operation_in_dim == OP_FEATURE_DIM
+    assert train_cfg.model.machine_in_dim == MACH_FEATURE_DIM
     assert train_cfg.ppo.total_timesteps == 65_536
     assert (train_cfg.ppo.n_steps * train_cfg.n_envs) % train_cfg.ppo.batch_size == 0
     assert train_cfg.eval_seed == train_cfg.seed + 1_000_000

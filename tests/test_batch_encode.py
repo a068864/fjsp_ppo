@@ -180,6 +180,24 @@ def test_compatibility_edge_attributes_reach_operation_embeddings():
     env.close()
 
 
+def test_precede_dep_type_attrs_reach_operation_embeddings():
+    env = FJSPEnv(n_machines=2, n_jobs=1, avg_operations_per_job=2, seed=0, device="cpu")
+    graph = env.reset(seed=0)[0]["graph"]
+    key = ("operation", "precede", "operation")
+    graph[key].edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    graph[key].edge_attr = torch.tensor([[1.0]], dtype=torch.float32)
+    changed = graph.clone()
+    changed[key].edge_attr = torch.tensor([[3.0]], dtype=torch.float32)
+    enc = GraphEncoder(hidden_dim=16, num_layers=1, num_heads=2, dropout=0.0)
+    enc.eval()
+    with torch.no_grad():
+        _ma, operations_a, graph_a = enc(graph)
+        _mb, operations_b, graph_b = enc(changed)
+    assert not torch.allclose(operations_a, operations_b)
+    assert not torch.allclose(graph_a, graph_b)
+    env.close()
+
+
 def test_predictor_logits_are_pairwise():
     torch.manual_seed(0)
     machines = torch.randn(2, 8)

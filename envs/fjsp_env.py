@@ -17,20 +17,31 @@ from utils import get_device, unflatten_action
 
 # Operation feature columns in state["operation"].x
 OP_DURATION = 0
-OP_PROGRESS = 1
-OP_SEQ_DEPS = 2
-OP_PAR_DEPS = 3
-OP_CROSS_DEPS = 4
-OP_SCHEDULED = 5
-OP_PROCESSING = 6
-OP_FINISHED = 7
-OP_REMAINING = 8
-OP_ELIGIBLE_COUNT = 9
-OP_CP_REMAINING = 10
-OP_JOB_REMAINING_WORK = 11
-OP_JOB_REMAINING_OPS = 12
-OP_READY = 13
-OP_FEATURE_DIM = 14
+OP_SEQ_DEPS = 1
+OP_PAR_DEPS = 2
+OP_CROSS_DEPS = 3
+OP_SCHEDULED = 4
+OP_PROCESSING = 5
+OP_FINISHED = 6
+OP_REMAINING = 7
+OP_CP_REMAINING = 8
+OP_JOB_REMAINING_WORK = 9
+OP_JOB_REMAINING_OPS = 10
+OP_READY = 11
+OP_FEATURE_DIM = 12
+
+# Machine feature columns in state["machine"].x
+MACH_QUEUE = 0
+MACH_WORKLOAD = 1
+MACH_IDLE_DURATION = 2
+MACH_FEATURE_DIM = 3
+
+# Scalar codes on operation --precede--> operation (0 = untyped)
+DEP_TYPE_ATTR = {
+    "sequential": 1.0,
+    "parallel": 2.0,
+    "cross_job": 3.0,
+}
 
 
 class HeteroGraphSpace(spaces.Space):
@@ -310,16 +321,6 @@ class FJSPEnv(gym.Env):
             eligibility.scatter_(1, perm[:, self.min_eligible_machines :], keep)
         return eligibility
 
-    def _calculate_eligible_machine_counts(self) -> torch.Tensor:
-        """
-        Calculate the number of eligible machines for each operation.
-
-        Returns:
-            Tensor of eligible machine counts for each operation
-        """
-        return torch.sum(self.eligibility_matrix, dim=1).to(torch.float32)
-
-
     @staticmethod
     def _build_adj(
         deps: List[Tuple[int, int]],
@@ -541,9 +542,6 @@ class FJSPEnv(gym.Env):
             self.eligibility_matrix = self._generate_eligibility_matrix()
             self.efficiency_modifiers = self._generate_efficiency_modifiers()
 
-            # Calculate eligible machine counts
-            eligible_machine_counts = self._calculate_eligible_machine_counts()
-
             # Initialize state graph
             self.state = HeteroData()
 
@@ -594,23 +592,30 @@ class FJSPEnv(gym.Env):
             # Initialize operation features
             self.state['operation'].x = torch.cat([
                 base_times,
-                torch.zeros(self.n_operations, 1, dtype=torch.float32, device=self.device),
                 sequential_deps.unsqueeze(-1).to(torch.float32),
                 parallel_deps.unsqueeze(-1).to(torch.float32),
                 cross_job_deps.unsqueeze(-1).to(torch.float32),
                 torch.zeros(self.n_operations, 3, dtype=torch.float32, device=self.device),
                 base_times,
-                eligible_machine_counts.unsqueeze(-1),
                 torch.zeros(
                     self.n_operations, 4, dtype=torch.float32, device=self.device
                 ),
             ], dim=1)
+            if int(self.state["operation"].x.size(1)) != OP_FEATURE_DIM:
+                raise RuntimeError(
+                    f"operation.x dim {self.state['operation'].x.size(1)} != {OP_FEATURE_DIM}"
+                )
 
             # Initialize machine features
-            self.state['machine'].x = torch.zeros(self.n_machines, 3, device=self.device)
+            self.state['machine'].x = torch.zeros(
+                self.n_machines, MACH_FEATURE_DIM, device=self.device
+            )
 
             # Initialize edges
             self.state['operation', 'precede', 'operation'].edge_index = edge_index
+            self.state['operation', 'precede', 'operation'].edge_attr = (
+                self._precede_attr_from_types(edge_index)
+            )
             self.state['operation', 'next', 'operation'].edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
             self.state['machine', 'processing', 'operation'].edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
 
@@ -649,6 +654,29 @@ class FJSPEnv(gym.Env):
         ("operation", "next", "operation"),
         ("operation", "precede", "operation"),
     )
+
+    def _precede_attr_from_types(self, edge_index: torch.Tensor) -> torch.Tensor:
+        """Dep-type scalar per precede edge (sequential=1, parallel=2, cross_job=3)."""
+        n_edges = int(edge_index.size(1))
+        if n_edges == 0:
+            return torch.zeros((0, 1), dtype=torch.float32, device=self.device)
+        codes = [
+            DEP_TYPE_ATTR.get(self.dependency_types.get((int(src), int(dst))), 0.0)
+            for src, dst in edge_index.t().tolist()
+        ]
+        return torch.tensor(codes, dtype=torch.float32, device=self.device).unsqueeze(-1)
+
+    def _sync_precede_attrs(self) -> None:
+        """Keep precede edge_attr aligned with live edges and dependency_types."""
+        if self.state is None:
+            return
+        key = ("operation", "precede", "operation")
+        if key not in self.state.edge_types:
+            return
+        edge_index = self.state[key].edge_index
+        if edge_index is None:
+            return
+        self.state[key].edge_attr = self._precede_attr_from_types(edge_index)
 
     def _remove_operation_edges(self, operation: int):
         """Remove all edges connected to a completed operation."""
@@ -867,6 +895,7 @@ class FJSPEnv(gym.Env):
     def _get_obs(self) -> Dict[str, Any]:
         """Build the opaque graph observation dict."""
         self._refresh_lookahead_features()
+        self._sync_precede_attrs()
         graph = self._policy_graph_snapshot()
         return {
             "dummy": np.zeros((1,), dtype=np.float32),
@@ -974,12 +1003,17 @@ class FJSPEnv(gym.Env):
         ticks = torch.ceil((remaining - 1e-6).clamp(min=0.0) / dt)
         return max(1, int(ticks.min().item()))
 
-    def _stamp_idle_fronts(self) -> None:
-        if self._front_machines.numel() == 0:
+    def _advance_clock(self, dt: float) -> None:
+        """Move simulated time; accumulate idle duration on empty machines."""
+        dt = float(dt)
+        if dt <= 0.0:
             return
-        idle = self._front_machines[~self._front_can_process]
-        if idle.numel() > 0:
-            self.state["machine"].x[idle, 2] = self.current_time
+        self.current_time += dt
+        if self.state is None or "machine" not in self.state.node_types:
+            return
+        idle = self.state["machine"].x[:, MACH_QUEUE] <= 0
+        if bool(idle.any().item()):
+            self.state["machine"].x[idle, MACH_IDLE_DURATION] += dt
 
     def _apply_processing_work(
         self, n_ticks: int, processing_ops: torch.Tensor
@@ -987,8 +1021,7 @@ class FJSPEnv(gym.Env):
         """Apply ``n_ticks`` of work to current fronts. Completions only at the end."""
         dt = float(self.time_step) * int(n_ticks)
         dt_t = torch.tensor(dt, device=self.device)
-        self.current_time += dt
-        self._stamp_idle_fronts()
+        self._advance_clock(dt)
         if not bool(processing_ops.any().item()):
             return []
 
@@ -998,8 +1031,8 @@ class FJSPEnv(gym.Env):
         rem_front = op_features[can_ops, OP_REMAINING]
         work_front = torch.minimum(rem_front, dt_t)
         if can_m.numel() > 0:
-            self.state["machine"].x[can_m, 1] = torch.maximum(
-                self.state["machine"].x[can_m, 1] - work_front, self._zero
+            self.state["machine"].x[can_m, MACH_WORKLOAD] = torch.maximum(
+                self.state["machine"].x[can_m, MACH_WORKLOAD] - work_front, self._zero
             )
 
         op_features[:, OP_PROCESSING] = self._zero
@@ -1007,24 +1040,11 @@ class FJSPEnv(gym.Env):
         op_features[can_ops, OP_REMAINING] = torch.maximum(
             rem_front - work_front, self._zero
         )
-        op_features[can_ops, OP_PROGRESS] = torch.clamp(
-            1
-            - torch.div(
-                op_features[can_ops, OP_REMAINING],
-                op_features[can_ops, OP_DURATION],
-            ),
-            min=self._zero,
-            max=self._one,
-        )
 
-        completed = processing_ops & (
-            (op_features[:, OP_REMAINING] <= 1e-6)
-            | (op_features[:, OP_PROGRESS] >= 1 - 1e-6)
-        )
+        completed = processing_ops & (op_features[:, OP_REMAINING] <= 1e-6)
         if not bool(completed.any().item()):
             return []
 
-        op_features[completed, OP_PROGRESS] = self._one
         op_features[completed, OP_REMAINING] = self._zero
         op_features[completed, OP_SCHEDULED : OP_FINISHED + 1] = self._done_status
         op_features[completed, OP_SEQ_DEPS : OP_CROSS_DEPS + 1] = self._zero
@@ -1032,12 +1052,14 @@ class FJSPEnv(gym.Env):
         done_on_front = completed[can_ops]
         done_machines = can_m[done_on_front]
         if done_machines.numel() > 0:
-            self.state["machine"].x[done_machines, 0] = torch.maximum(
-                self.state["machine"].x[done_machines, 0] - 1, self._zero
+            self.state["machine"].x[done_machines, MACH_QUEUE] = torch.maximum(
+                self.state["machine"].x[done_machines, MACH_QUEUE] - 1, self._zero
             )
-            newly_idle = done_machines[self.state["machine"].x[done_machines, 0] == 0]
+            newly_idle = done_machines[
+                self.state["machine"].x[done_machines, MACH_QUEUE] == 0
+            ]
             if newly_idle.numel() > 0:
-                self.state["machine"].x[newly_idle, 2] = self.current_time
+                self.state["machine"].x[newly_idle, MACH_IDLE_DURATION] = self._zero
 
         completed_ids = [int(i) for i in torch.where(completed)[0].tolist()]
         self._remove_operations_edges(completed_ids)
@@ -1064,8 +1086,7 @@ class FJSPEnv(gym.Env):
         while left > 0:
             processing_ops, _blocked = self._get_processing_operations()
             if not bool(processing_ops.any().item()):
-                self.current_time += left * dt
-                self._stamp_idle_fronts()
+                self._advance_clock(left * dt)
                 break
             k = min(left, self._ticks_to_next_completion(processing_ops))
             completed_all.extend(self._apply_processing_work(k, processing_ops))
@@ -1133,7 +1154,12 @@ class FJSPEnv(gym.Env):
                 queue_ops = proc_edges[1][machine_mask]
                 if len(queue_ops) > 0:
                     last_op = queue_ops[-1].item()
-                    self._add_edge('next', last_op, operation)
+                    self._add_edge(
+                        'next',
+                        last_op,
+                        operation,
+                        torch.zeros((1, 1), dtype=torch.float32, device=self.device),
+                    )
 
         # Get efficiency modifier for this operation-machine pair
         efficiency_modifier = self.efficiency_modifiers[operation, machine]
@@ -1144,14 +1170,12 @@ class FJSPEnv(gym.Env):
         self._add_edge('processing', machine, operation, edge_attr)
         self._add_edge('processed_by', operation, machine, edge_attr)
 
-        base_time = self.state['operation'].x[operation, 0]
+        base_time = self.state['operation'].x[operation, OP_DURATION]
         adjusted_time = base_time * efficiency_modifier
 
-        self.state['machine'].x[machine, 0] += 1
-        self.state['machine'].x[machine, 1] += adjusted_time
-
-        if self.state['machine'].x[machine, 0] == 1:
-            self.state['machine'].x[machine, 2] = self.current_time
+        self.state['machine'].x[machine, MACH_QUEUE] += 1
+        self.state['machine'].x[machine, MACH_WORKLOAD] += adjusted_time
+        self.state['machine'].x[machine, MACH_IDLE_DURATION] = 0
 
         # Effective duration becomes the efficiency-adjusted time so completion %
         # (remaining / duration) stays consistent after scheduling.
@@ -1168,7 +1192,7 @@ class FJSPEnv(gym.Env):
         """Lower bound on makespan: clock plus remaining queued machine work."""
         if self.state is None:
             return float(self.current_time)
-        workload = self.state["machine"].x[:, 1]
+        workload = self.state["machine"].x[:, MACH_WORKLOAD]
         max_wl = float(workload.max().item()) if workload.numel() else 0.0
         return float(self.current_time) + max_wl
 
@@ -1223,7 +1247,7 @@ class FJSPEnv(gym.Env):
         processing_ops, blocked_machines = self._get_processing_operations()
         if self._is_gridlock(processing_ops, blocked_machines):
             # Still advance the clock so makespan/time stay consistent, then terminate.
-            self.current_time += float(self.time_step)
+            self._advance_clock(float(self.time_step))
             reward = self._completion_delta_reward(before, self.estimated_completion())
             reward += self.failure_penalty()
             self.last_success = False

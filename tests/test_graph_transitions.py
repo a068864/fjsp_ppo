@@ -9,13 +9,17 @@ import pytest
 import torch
 
 from envs.fjsp_env import (
+    DEP_TYPE_ATTR,
     FJSPEnv,
+    MACH_IDLE_DURATION,
+    MACH_QUEUE,
+    MACH_WORKLOAD,
     OP_CROSS_DEPS,
     OP_DURATION,
+    OP_FEATURE_DIM,
     OP_FINISHED,
     OP_PAR_DEPS,
     OP_PROCESSING,
-    OP_PROGRESS,
     OP_REMAINING,
     OP_SCHEDULED,
     OP_SEQ_DEPS,
@@ -67,7 +71,7 @@ def _assert_graph_consistent(env: FJSPEnv, graph) -> None:
     mach_x = graph["machine"].x
     assert torch.allclose(op_x, env.state["operation"].x)
     assert torch.allclose(mach_x, env.state["machine"].x)
-    assert op_x.shape == (env.n_operations, 14)
+    assert op_x.shape == (env.n_operations, OP_FEATURE_DIM)
     assert mach_x.shape == (env.n_machines, 3)
 
     scheduled = op_x[:, OP_SCHEDULED] > 0.5
@@ -79,17 +83,21 @@ def _assert_graph_consistent(env: FJSPEnv, graph) -> None:
 
     remaining = op_x[:, OP_REMAINING]
     duration = op_x[:, OP_DURATION]
-    progress = op_x[:, OP_PROGRESS]
     assert bool((remaining >= -1e-5).all().item())
-    assert bool((progress >= -1e-5).all().item() and (progress <= 1 + 1e-5).all().item())
     live = scheduled | processing
     if bool(live.any().item()):
-        expected = torch.clamp(1 - remaining[live] / duration[live].clamp(min=1e-8), 0, 1)
-        assert torch.allclose(progress[live], expected, atol=1e-4)
         assert bool((remaining[live] <= duration[live] + 1e-4).all().item())
     if bool(finished.any().item()):
         assert torch.allclose(remaining[finished], torch.zeros_like(remaining[finished]), atol=1e-5)
-        assert torch.allclose(progress[finished], torch.ones_like(progress[finished]), atol=1e-5)
+
+    busy = mach_x[:, MACH_QUEUE] > 0.5
+    assert bool((mach_x[:, MACH_IDLE_DURATION] >= -1e-5).all().item())
+    if bool(busy.any().item()):
+        assert torch.allclose(
+            mach_x[busy, MACH_IDLE_DURATION],
+            torch.zeros_like(mach_x[busy, MACH_IDLE_DURATION]),
+            atol=1e-5,
+        )
 
     still_alive = bool((~finished).any().item())
     _assert_attr_aligned(graph, COMPAT, require=still_alive)
@@ -153,6 +161,16 @@ def _assert_graph_consistent(env: FJSPEnv, graph) -> None:
         for feature, counts in incoming.items():
             assert float(op_x[i, feature].item()) == pytest.approx(counts[i], abs=1e-5)
 
+    precede_pairs = _edge_pairs(graph, PRECEDE)
+    _assert_attr_aligned(graph, PRECEDE, require=bool(precede_pairs))
+    _assert_attr_aligned(env.state, PRECEDE, require=bool(precede_pairs))
+    if precede_pairs:
+        attr = graph[PRECEDE].edge_attr.reshape(-1)
+        for i, (src, dst) in enumerate(precede_pairs):
+            kind = env.dependency_types.get((src, dst))
+            want = DEP_TYPE_ATTR.get(kind, 0.0)
+            assert float(attr[i].item()) == pytest.approx(want, abs=1e-5)
+
     for edge_type in EDGE_TYPES:
         if edge_type not in graph.edge_types:
             continue
@@ -206,9 +224,31 @@ def test_schedule_writes_processing_edge_attr_and_machine_features():
     assert float(graph["operation"].x[0, OP_SCHEDULED].item()) == pytest.approx(1.0)
     assert (0, 0) in _edge_pairs(graph, PROC)
     assert float(graph[PROC].edge_attr.reshape(-1)[0].item()) == pytest.approx(1.25)
-    assert float(graph["machine"].x[0, 0].item()) == pytest.approx(1.0)
-    assert float(graph["machine"].x[0, 1].item()) == pytest.approx(
+    assert float(graph["machine"].x[0, MACH_QUEUE].item()) == pytest.approx(1.0)
+    assert float(graph["machine"].x[0, MACH_WORKLOAD].item()) == pytest.approx(
         float(graph["operation"].x[0, OP_REMAINING].item())
+    )
+    assert float(graph["machine"].x[0, MACH_IDLE_DURATION].item()) == pytest.approx(0.0)
+    env.close()
+
+
+def test_idle_duration_accumulates_on_empty_machines_only():
+    env = FJSPEnv(n_machines=2, n_jobs=1, avg_operations_per_job=2, seed=0, device="cpu")
+    env.reset(seed=0)
+    env.eligibility_matrix[:, :] = True
+    env.efficiency_modifiers[:, :] = 1.0
+    env.dependency_types = {}
+    env.state[PRECEDE].edge_index = torch.empty((2, 0), dtype=torch.long, device=env.device)
+    env.state[PRECEDE].edge_attr = torch.zeros((0, 1), dtype=torch.float32, device=env.device)
+    env.state["operation"].x[:, :] = 0
+    env.state["operation"].x[:, OP_DURATION] = env.time_step
+    env.state["operation"].x[:, OP_REMAINING] = env.time_step
+    env.state["machine"].x[:] = 0
+    env.schedule_operation(0, 0)
+    env._advance_time_ticks(1)
+    assert float(env.state["machine"].x[0, MACH_IDLE_DURATION].item()) == pytest.approx(0.0)
+    assert float(env.state["machine"].x[1, MACH_IDLE_DURATION].item()) == pytest.approx(
+        float(env.time_step)
     )
     env.close()
 

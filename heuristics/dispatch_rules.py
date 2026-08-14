@@ -6,7 +6,7 @@ from typing import Dict, Tuple
 
 import numpy as np
 
-from envs.fjsp_env import OP_DURATION, OP_ELIGIBLE_COUNT, OP_FINISHED, OP_SCHEDULED, FJSPEnv
+from envs.fjsp_env import OP_DURATION, OP_FINISHED, OP_SCHEDULED, FJSPEnv, MACH_QUEUE, MACH_WORKLOAD
 from utils import unflatten_action
 
 # (minimize?, scorer name) — scorer returns a float per flat action.
@@ -62,13 +62,13 @@ def _score_action(env: FJSPEnv, action: int, kind: str) -> float:
     if kind == "fifo":
         return float(op)
     if kind == "flex":
-        return float(env.state["operation"].x[op, OP_ELIGIBLE_COUNT].item())
+        return float(env.eligibility_matrix[op].sum().item())
     if kind == "queue":
-        return float(env.state["machine"].x[machine, 0].item())
+        return float(env.state["machine"].x[machine, MACH_QUEUE].item())
     if kind == "workload":
-        return float(env.state["machine"].x[machine, 1].item())
+        return float(env.state["machine"].x[machine, MACH_WORKLOAD].item())
     if kind == "ect":
-        return float(env.state["machine"].x[machine, 1].item()) + _effective_proc(env, machine, op)
+        return float(env.state["machine"].x[machine, MACH_WORKLOAD].item()) + _effective_proc(env, machine, op)
     raise ValueError(f"unknown score kind: {kind}")
 
 

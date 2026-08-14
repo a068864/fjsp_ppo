@@ -141,7 +141,7 @@ class ModelConfig:
     num_heads: int = 4
     dropout: float = 0.0
     predictor_type: Literal["dot_product", "bilinear"] = "bilinear"
-    operation_in_dim: int = 14
+    operation_in_dim: int = 12
     machine_in_dim: int = 3
     critic_hidden_dim: int = 256
 

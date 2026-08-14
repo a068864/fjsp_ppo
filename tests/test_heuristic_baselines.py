@@ -9,7 +9,6 @@ import torch
 from baseline_heuristic import parse_args
 from envs.fjsp_env import (
     OP_DURATION,
-    OP_ELIGIBLE_COUNT,
     OP_FINISHED,
     OP_SCHEDULED,
     FJSPEnv,
@@ -142,7 +141,6 @@ def test_fifo_on_live_env_picks_lowest_op_index():
     )
     env.state["operation"].x[:, OP_SCHEDULED] = 0
     env.state["operation"].x[:, OP_FINISHED] = 0
-    env.state["operation"].x[:, OP_ELIGIBLE_COUNT] = 2
     env._cached_action_mask = None
     action = select_heuristic_action(env, "FIFO")
     _, op = divmod(action, env.n_operations)
