@@ -55,6 +55,20 @@ def test_best_callback_preserves_existing_score(tmp_path: Path):
     assert load_best_score(tmp_path) == pytest.approx(4.0)
 
 
+def test_best_callback_ignores_score_from_mismatched_checkpoint(tmp_path: Path):
+    save_best_score(tmp_path, 61.2, metric="mean_makespan")
+    zip_path = tmp_path / "best_model.zip"
+    zip_path.write_bytes(b"old")
+    write_checkpoint_metadata(zip_path, config={"model": {"operation_in_dim": 10}})
+    cb = BestModelCallback(
+        zip_path,
+        metric="mean_makespan",
+        config={"model": {"operation_in_dim": 14}},
+    )
+    cb.load_persisted_best(tmp_path)
+    assert cb.best_score == pytest.approx(np.inf)
+
+
 def test_best_callback_minimizes_makespan(tmp_path: Path):
     cb = BestModelCallback(tmp_path / "best_model.zip", metric="mean_makespan")
     cb.model = _FakeModel([])

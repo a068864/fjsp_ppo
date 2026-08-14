@@ -26,6 +26,11 @@ OP_PROCESSING = 6
 OP_FINISHED = 7
 OP_REMAINING = 8
 OP_ELIGIBLE_COUNT = 9
+OP_CP_REMAINING = 10
+OP_JOB_REMAINING_WORK = 11
+OP_JOB_REMAINING_OPS = 12
+OP_READY = 13
+OP_FEATURE_DIM = 14
 
 
 class HeteroGraphSpace(spaces.Space):
@@ -593,7 +598,10 @@ class FJSPEnv(gym.Env):
                 cross_job_deps.unsqueeze(-1).to(torch.float32),
                 torch.zeros(self.n_operations, 3, dtype=torch.float32, device=self.device),
                 base_times,
-                eligible_machine_counts.unsqueeze(-1)
+                eligible_machine_counts.unsqueeze(-1),
+                torch.zeros(
+                    self.n_operations, 4, dtype=torch.float32, device=self.device
+                ),
             ], dim=1)
 
             # Initialize machine features
@@ -715,6 +723,74 @@ class FJSPEnv(gym.Env):
                 device=self.device,
             )
 
+    def _ready_operation_mask(self, state: Optional[HeteroData] = None) -> torch.Tensor:
+        """Unscheduled ops whose predecessors have all started."""
+        if state is None:
+            state = self.state
+        op_x = state["operation"].x
+        unscheduled = (op_x[:, OP_SCHEDULED] == 0) & (op_x[:, OP_FINISHED] == 0)
+        started = (
+            op_x[:, OP_SCHEDULED] + op_x[:, OP_PROCESSING] + op_x[:, OP_FINISHED]
+        ) > 0
+        prereq_ok = torch.ones(self.n_operations, dtype=torch.bool, device=op_x.device)
+        dep = state["operation", "precede", "operation"].edge_index
+        if dep.numel() > 0:
+            src, dst = dep[0], dep[1]
+            bad_dst = dst[~started[src]]
+            if bad_dst.numel() > 0:
+                prereq_ok[bad_dst.unique()] = False
+        return unscheduled & prereq_ok
+
+    def _refresh_lookahead_features(self) -> None:
+        """Write CP remaining, job remaining, and ready flag onto operation.x."""
+        if self.state is None or "operation" not in self.state.node_types:
+            return
+        op_x = self.state["operation"].x
+        remaining = op_x[:, OP_REMAINING]
+        finished = op_x[:, OP_FINISHED] > 0.5
+        ready = self._ready_operation_mask()
+        op_x[:, OP_READY] = ready.to(dtype=op_x.dtype)
+
+        job_work = torch.zeros_like(remaining)
+        job_ops = torch.zeros_like(remaining)
+        if self.job_sequences:
+            for seq in self.job_sequences:
+                members = torch.tensor(seq, dtype=torch.long, device=op_x.device)
+                alive = ~finished[members]
+                job_work[members] = remaining[members][alive].sum()
+                job_ops[members] = alive.to(dtype=op_x.dtype).sum()
+        op_x[:, OP_JOB_REMAINING_WORK] = job_work
+        op_x[:, OP_JOB_REMAINING_OPS] = job_ops
+
+        # Longest remaining-duration path through successors, including this op.
+        cp = remaining.masked_fill(finished, 0.0)
+        dep = self.state["operation", "precede", "operation"].edge_index
+        n = int(op_x.size(0))
+        if dep.numel() > 0:
+            succ: List[List[int]] = [[] for _ in range(n)]
+            indeg = [0] * n
+            for src, dst in dep.t().tolist():
+                succ[int(src)].append(int(dst))
+                indeg[int(dst)] += 1
+            order: List[int] = []
+            queue = deque(i for i in range(n) if indeg[i] == 0)
+            while queue:
+                u = queue.popleft()
+                order.append(u)
+                for v in succ[u]:
+                    indeg[v] -= 1
+                    if indeg[v] == 0:
+                        queue.append(v)
+            for u in reversed(order):
+                if bool(finished[u].item()):
+                    cp[u] = self._zero
+                    continue
+                best = 0.0
+                for v in succ[u]:
+                    best = max(best, float(cp[v].item()))
+                cp[u] = remaining[u] + best
+        op_x[:, OP_CP_REMAINING] = cp
+
     def _compute_action_mask(self, state: Optional[HeteroData] = None) -> np.ndarray:
         """Vectorized valid-action mask: unscheduled ∧ prereqs started ∧ eligible."""
         if state is None:
@@ -723,21 +799,7 @@ class FJSPEnv(gym.Env):
         if state is None or "operation" not in state.node_types:
             return np.zeros((n_actions,), dtype=np.float32)
 
-        op_x = state["operation"].x
-        unscheduled = (op_x[:, OP_SCHEDULED] == 0) & (op_x[:, OP_FINISHED] == 0)
-        started = (
-            op_x[:, OP_SCHEDULED] + op_x[:, OP_PROCESSING] + op_x[:, OP_FINISHED]
-        ) > 0
-
-        prereq_ok = torch.ones(self.n_operations, dtype=torch.bool, device=op_x.device)
-        dep = state["operation", "precede", "operation"].edge_index
-        if dep.numel() > 0:
-            src, dst = dep[0], dep[1]
-            bad_dst = dst[~started[src]]
-            if bad_dst.numel() > 0:
-                prereq_ok[bad_dst.unique()] = False
-
-        ready_ops = unscheduled & prereq_ok  # (n_ops,)
+        ready_ops = self._ready_operation_mask(state)
         # eligibility: (n_ops, n_machines); action layout is machine-major.
         elig = self.eligibility_matrix & ready_ops.unsqueeze(1)
         return elig.T.reshape(-1).to(dtype=torch.float32).detach().cpu().numpy()
@@ -799,6 +861,7 @@ class FJSPEnv(gym.Env):
 
     def _get_obs(self) -> Dict[str, Any]:
         """Build the opaque graph observation dict."""
+        self._refresh_lookahead_features()
         graph = self._policy_graph_snapshot()
         return {
             "dummy": np.zeros((1,), dtype=np.float32),

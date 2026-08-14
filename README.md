@@ -146,7 +146,11 @@ Each `step()` assigns one operation, then advances simulated time by a fixed `ti
 | dropout             | 0.0 (required) |
 | n_steps             | 256        |
 | batch_size          | 64         |
-| n_epochs            | 8          |
+| n_epochs            | 4          |
+| vf_coef             | 0.25       |
+| max_grad_norm       | 2.0        |
+| target_kl           | 0.02       |
+| lr_end_fraction     | 0.5        |
 | ent_coef            | 0.01       |
 | gae_lambda          | 1.0        |
 | total_timesteps     | 65536      |

@@ -122,7 +122,7 @@ class ModelConfig:
     num_heads: int = 4
     dropout: float = 0.0
     predictor_type: Literal["dot_product", "bilinear"] = "bilinear"
-    operation_in_dim: int = 10
+    operation_in_dim: int = 14
     machine_in_dim: int = 3
     critic_hidden_dim: int = 256
 
@@ -165,11 +165,13 @@ class PPOConfig:
     batch_size: int = 128
     n_epochs: int = 4
     ent_coef: float = 0.01
-    vf_coef: float = 0.5
-    max_grad_norm: float = 0.5
+    # Shared encoder: 0.5 let value MSE (~21 at init) drown the policy term.
+    vf_coef: float = 0.25
+    max_grad_norm: float = 2.0  # 0.5 bound every update on the 4-layer demo run
     total_timesteps: int = 1_000_000
     # Early-stop PPO epochs when approx KL exceeds this (None disables).
-    target_kl: float = 0.05
+    # 0.05 never fired (max KL 0.041) so 8 epochs overfit the 512-sample rollout.
+    target_kl: float = 0.02
 
     def __post_init__(self) -> None:
         self.validate()
@@ -323,7 +325,7 @@ def get_debug_train_config() -> TrainConfig:
         eval_freq_updates=4,
         n_eval_episodes=10,
         lr_schedule="linear",
-        lr_end_fraction=0.2,
+        lr_end_fraction=0.5,
         env=replace(DEBUG_SCALE_ENV),
         model=ModelConfig(
             hidden_dim=64,
@@ -338,10 +340,11 @@ def get_debug_train_config() -> TrainConfig:
             clip_range=0.2,
             n_steps=256,
             batch_size=64,
-            n_epochs=8,
+            n_epochs=4,
             ent_coef=0.01,
-            vf_coef=0.5,
-            target_kl=0.05,
+            vf_coef=0.25,
+            max_grad_norm=2.0,
+            target_kl=0.02,
             total_timesteps=65_536,
         ),
     )

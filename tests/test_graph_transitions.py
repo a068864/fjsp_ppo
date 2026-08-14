@@ -67,7 +67,7 @@ def _assert_graph_consistent(env: FJSPEnv, graph) -> None:
     mach_x = graph["machine"].x
     assert torch.allclose(op_x, env.state["operation"].x)
     assert torch.allclose(mach_x, env.state["machine"].x)
-    assert op_x.shape == (env.n_operations, 10)
+    assert op_x.shape == (env.n_operations, 14)
     assert mach_x.shape == (env.n_machines, 3)
 
     scheduled = op_x[:, OP_SCHEDULED] > 0.5

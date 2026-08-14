@@ -135,7 +135,7 @@ class GraphEncoder(nn.Module):
         blocks -> attentional pooling over operations and machines -> graph MLP.
 
     Args:
-        operation_in_dim: Operation node feature dimension (default 10).
+        operation_in_dim: Operation node feature dimension (default 14).
         machine_in_dim: Machine node feature dimension (default 3).
         hidden_dim: Latent width for node embeddings.
         num_layers: Number of heterogeneous residual blocks.
@@ -145,7 +145,7 @@ class GraphEncoder(nn.Module):
 
     def __init__(
         self,
-        operation_in_dim: int = 10,
+        operation_in_dim: int = 14,
         machine_in_dim: int = 3,
         hidden_dim: int = 64,
         num_layers: int = 3,

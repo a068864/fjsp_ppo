@@ -23,6 +23,11 @@ def test_debug_ppo_uses_full_horizon_gae_and_low_entropy():
     assert cfg.ppo.gae_lambda == pytest.approx(1.0)
     assert cfg.ppo.ent_coef == pytest.approx(0.01)
     assert cfg.ppo.gamma == pytest.approx(1.0)
+    assert cfg.ppo.n_epochs == 4
+    assert cfg.ppo.vf_coef == pytest.approx(0.25)
+    assert cfg.ppo.max_grad_norm == pytest.approx(2.0)
+    assert cfg.ppo.target_kl == pytest.approx(0.02)
+    assert cfg.lr_end_fraction == pytest.approx(0.5)
 
 
 def test_nonterminal_step_reward_tracks_completion_bound():
