@@ -180,6 +180,25 @@ def test_compatibility_edge_attributes_reach_operation_embeddings():
     env.close()
 
 
+def test_predictor_logits_are_pairwise():
+    torch.manual_seed(0)
+    machines = torch.randn(2, 8)
+    operations = torch.randn(3, 8)
+    for predictor_type in ("dot_product", "bilinear"):
+        predictor = EdgePredictor(hidden_dim=8, predictor_type=predictor_type)
+        predictor.norm_m = torch.nn.Identity()
+        predictor.norm_o = torch.nn.Identity()
+        predictor.eval()
+        with torch.no_grad():
+            base = predictor(machines, operations).view(2, 3)
+            ops2 = operations.clone()
+            ops2[1] += 1.0
+            changed = predictor(machines, ops2).view(2, 3)
+        assert not torch.allclose(base[:, 1], changed[:, 1])
+        assert torch.allclose(base[:, 0], changed[:, 0])
+        assert torch.allclose(base[:, 2], changed[:, 2])
+
+
 def test_bilinear_predictor_uses_efficiency_bias():
     torch.manual_seed(0)
     predictor = EdgePredictor(hidden_dim=8, predictor_type="bilinear")

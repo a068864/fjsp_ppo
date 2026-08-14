@@ -121,7 +121,7 @@ class ModelConfig:
     num_layers: int = 3
     num_heads: int = 4
     dropout: float = 0.0
-    predictor_type: Literal["dot_product", "bilinear", "attention"] = "bilinear"
+    predictor_type: Literal["dot_product", "bilinear"] = "bilinear"
     operation_in_dim: int = 10
     machine_in_dim: int = 3
     critic_hidden_dim: int = 256
@@ -149,7 +149,7 @@ class ModelConfig:
                 "dropout must be 0.0 for deterministic PPO likelihoods, "
                 f"got {self.dropout!r}"
             )
-        if self.predictor_type not in ("dot_product", "bilinear", "attention"):
+        if self.predictor_type not in ("dot_product", "bilinear"):
             raise ValueError(f"predictor_type is invalid: {self.predictor_type!r}")
 
 

@@ -29,6 +29,7 @@ from training.eval_cli import apply_shared_eval_args
         ),
         (lambda: ModelConfig(hidden_dim=0), "hidden_dim"),
         (lambda: ModelConfig(dropout=0.1), "dropout"),
+        (lambda: ModelConfig(predictor_type="attention"), "predictor_type"),  # type: ignore[arg-type]
         (lambda: PPOConfig(n_steps=0), "n_steps"),
         (lambda: PPOConfig(batch_size=0), "batch_size"),
         (lambda: PPOConfig(n_epochs=0), "n_epochs"),
