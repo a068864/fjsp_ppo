@@ -6,10 +6,13 @@ instead of hard-coding constants.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
+
+_UINT32_MAX = 2**32 - 1
 
 _DEVICE_RE = re.compile(r"^(?:auto|cpu|mps|cuda(?::(\d+))?)$")
 
@@ -40,6 +43,21 @@ def _require_positive_float(name: str, value: float) -> None:
         raise ValueError(f"{name} must be a positive float, got {value!r}") from exc
     if value_f <= 0.0:
         raise ValueError(f"{name} must be a positive float, got {value!r}")
+
+
+def _require_negative_finite_float(name: str, value: float) -> None:
+    try:
+        value_f = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite negative float, got {value!r}") from exc
+    if not math.isfinite(value_f) or value_f >= 0.0:
+        raise ValueError(f"{name} must be a finite negative float, got {value!r}")
+
+
+def _require_uint32(name: str, value: int) -> None:
+    _require_non_negative_int(name, value)
+    if int(value) > _UINT32_MAX:
+        raise ValueError(f"{name} must be <= 2**32-1, got {value!r}")
 
 
 def validate_device(device: str) -> None:
@@ -101,6 +119,7 @@ class EnvConfig:
         _require_probability("cross_job_dep_prob", self.cross_job_dep_prob)
         _require_probability("shared_dep_prob", self.shared_dep_prob)
         _require_positive_float("time_step", self.time_step)
+        _require_negative_finite_float("time_penalty", self.time_penalty)
         try:
             std = float(self.compatible_efficiency_std)
         except (TypeError, ValueError) as exc:
@@ -221,7 +240,6 @@ class TrainConfig:
     best_metric: Literal["mean_reward", "mean_makespan"] = "mean_makespan"
     lr_schedule: Literal["constant", "linear"] = "linear"
     lr_end_fraction: float = 0.1
-    normalize_reward: bool = False
     resume: bool = False
     trust_checkpoint: bool = False
     env: EnvConfig = field(default_factory=EnvConfig)
@@ -253,12 +271,17 @@ class TrainConfig:
 
     def validate(self) -> None:
         """Raise ``ValueError`` when train/eval counts or PPO batching are invalid."""
-        _require_non_negative_int("seed", self.seed)
+        _require_uint32("seed", self.seed)
         _require_positive_int("n_envs", self.n_envs)
         _require_positive_int("checkpoint_freq_updates", self.checkpoint_freq_updates)
         _require_positive_int("eval_freq_updates", self.eval_freq_updates)
         _require_positive_int("n_eval_episodes", self.n_eval_episodes)
-        _require_non_negative_int("eval_seed", int(self.eval_seed))
+        _require_uint32("eval_seed", int(self.eval_seed))
+        max_worker_seed = int(self.seed) + (int(self.n_envs) - 1) * 1000
+        if max_worker_seed > _UINT32_MAX:
+            raise ValueError(
+                f"worker seeds exceed 2**32-1 (seed={self.seed}, n_envs={self.n_envs})"
+            )
         if self.best_metric not in ("mean_reward", "mean_makespan"):
             raise ValueError(f"best_metric is invalid: {self.best_metric!r}")
         validate_device(self.device)
@@ -297,7 +320,7 @@ class EvalConfig:
 
     def validate(self) -> None:
         """Raise ``ValueError`` when evaluation parameters are invalid."""
-        _require_non_negative_int("seed", self.seed)
+        _require_uint32("seed", self.seed)
         _require_positive_int("n_episodes", self.n_episodes)
         validate_device(self.device)
         if not isinstance(self.model_path, str) or not self.model_path:
@@ -356,10 +379,11 @@ def get_default_train_config() -> TrainConfig:
 
 
 def get_full_scale_train_config() -> TrainConfig:
-    """Serious-run config: 25×15×8 instance and default model/PPO sizes."""
+    """Serious-run config: 25×15×8 instance, default model sizes, n_steps=512."""
     return TrainConfig(
         n_envs=8,
         env=replace(FULL_SCALE_ENV),
+        ppo=PPOConfig(n_steps=512),
     )
 
 

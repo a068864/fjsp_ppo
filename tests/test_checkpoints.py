@@ -66,6 +66,17 @@ def test_metadata_fingerprint_and_incompatible_resume(tmp_path: Path):
     write_checkpoint_metadata(ckpt, config=cfg_a)
     meta = json.loads(meta_path_for(ckpt).read_text(encoding="utf-8"))
     assert meta["config_fingerprint"] == config_fingerprint(cfg_a)
+    assert "zip_sha256" in meta
     assert_config_compatible(ckpt, cfg_a)
     with pytest.raises(ValueError, match="fingerprint"):
         assert_config_compatible(ckpt, cfg_b)
+
+
+def test_zip_hash_rejects_swapped_checkpoint(tmp_path: Path):
+    ckpt = tmp_path / "latest_model.zip"
+    ckpt.write_bytes(b"zip-a")
+    cfg = {"env": {"n_machines": 5}}
+    write_checkpoint_metadata(ckpt, config=cfg)
+    ckpt.write_bytes(b"zip-b")
+    with pytest.raises(ValueError, match="zip hash"):
+        assert_config_compatible(ckpt, cfg)

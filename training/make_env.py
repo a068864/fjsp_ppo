@@ -223,7 +223,7 @@ class GraphSubprocVecEnv(SubprocVecEnv):
     """SubprocVecEnv that stacks opaque FJSP graph observations correctly."""
 
     def __init__(self, env_fns: Sequence[Callable[[], gym.Env]], start_method: Optional[str] = None):
-        super().__init__(env_fns, start_method=start_method)
+        super().__init__(env_fns, start_method=start_method or "spawn")
         # Replace observation space with SB3-friendly Dict (graphs remain object arrays).
         n_actions = int(self.action_space.n)
         self.observation_space = make_sb3_observation_space(n_actions)

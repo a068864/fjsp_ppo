@@ -52,7 +52,6 @@ def build_eval_train_config(eval_cfg: EvalConfig) -> TrainConfig:
     train_cfg.env = eval_cfg.env
     train_cfg.model = eval_cfg.model
     train_cfg.n_envs = 1
-    train_cfg.normalize_reward = False
     return train_cfg
 
 

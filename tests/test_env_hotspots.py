@@ -55,3 +55,18 @@ def test_dependencies_acyclic_and_include_sequential():
         for a, b in zip(seq, seq[1:]):
             assert env.dependency_types[(a, b)] == "sequential"
     env.close()
+
+
+def test_shared_dep_prob_adds_parallel_skip_edges():
+    env = FJSPEnv(
+        n_machines=2,
+        n_jobs=1,
+        avg_operations_per_job=4,
+        shared_dep_prob=1.0,
+        cross_job_dep_prob=0.0,
+        seed=0,
+        device="cpu",
+    )
+    env.reset(seed=0)
+    assert "parallel" in env.dependency_types.values()
+    env.close()

@@ -23,6 +23,7 @@ from training.eval_cli import apply_shared_eval_args
         (lambda: EnvConfig(n_machines=0), "n_machines"),
         (lambda: EnvConfig(connection_drop_prob=1.1), "connection_drop_prob"),
         (lambda: EnvConfig(time_step=0.0), "time_step"),
+        (lambda: EnvConfig(time_penalty=0.0), "time_penalty"),
         (
             lambda: EnvConfig(n_machines=2, min_eligible_machines=3),
             "min_eligible_machines",
@@ -34,6 +35,7 @@ from training.eval_cli import apply_shared_eval_args
         (lambda: PPOConfig(batch_size=0), "batch_size"),
         (lambda: PPOConfig(n_epochs=0), "n_epochs"),
         (lambda: TrainConfig(seed=-1), "seed"),
+        (lambda: TrainConfig(seed=2**32), "seed"),
         (lambda: TrainConfig(n_envs=0), "n_envs"),
         (lambda: TrainConfig(device="gpu"), "device"),
         (lambda: TrainConfig(checkpoint_freq_updates=0), "checkpoint_freq_updates"),

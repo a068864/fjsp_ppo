@@ -49,11 +49,19 @@ def test_nonterminal_step_reward_tracks_completion_bound():
 
 
 def test_failure_penalty_worse_than_serial_success_bound():
-    env = FJSPEnv(n_machines=2, n_jobs=2, avg_operations_per_job=2, seed=0, device="cpu")
+    env = FJSPEnv(
+        n_machines=2,
+        n_jobs=2,
+        avg_operations_per_job=2,
+        time_step=4.0,
+        seed=0,
+        device="cpu",
+    )
     worst_success = (
         float(env.time_penalty)
         * float(env.n_operations)
         * float(env.max_operation_duration)
+        * float(env.time_step)
         * 1.5
     )
     assert env.failure_penalty() < worst_success

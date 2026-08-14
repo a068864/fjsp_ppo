@@ -89,15 +89,14 @@ class LatestCheckpointCallback(BaseCallback):
             return
         if update_idx == self._last_saved_update:
             return
-        from training.checkpoints import write_checkpoint_metadata
+        from training.checkpoints import save_checkpoint
 
-        self.model.save(str(self.save_path))
-        if self.config is not None:
-            write_checkpoint_metadata(
-                self.save_path,
-                config=self.config,
-                extra={"num_timesteps": int(self.num_timesteps), "update_idx": int(update_idx)},
-            )
+        save_checkpoint(
+            self.model,
+            self.save_path,
+            config=self.config,
+            extra={"num_timesteps": int(self.num_timesteps), "update_idx": int(update_idx)},
+        )
         self._last_saved_update = update_idx
         if self.verbose:
             logger.info(
@@ -114,15 +113,14 @@ class LatestCheckpointCallback(BaseCallback):
 
     def _on_training_end(self) -> None:
         ensure_dir(self.save_path.parent)
-        from training.checkpoints import write_checkpoint_metadata
+        from training.checkpoints import save_checkpoint
 
-        self.model.save(str(self.save_path))
-        if self.config is not None:
-            write_checkpoint_metadata(
-                self.save_path,
-                config=self.config,
-                extra={"num_timesteps": int(self.num_timesteps), "final": True},
-            )
+        save_checkpoint(
+            self.model,
+            self.save_path,
+            config=self.config,
+            extra={"num_timesteps": int(self.num_timesteps), "final": True},
+        )
         logger.info("Saved final latest checkpoint -> %s", self.save_path)
 
 
@@ -195,19 +193,18 @@ class BestModelCallback(BaseCallback):
         self.best_score = value
         self.best_mean_reward = value
         ensure_dir(self.save_path.parent)
-        from training.checkpoints import save_best_score, write_checkpoint_metadata
+        from training.checkpoints import save_best_score, save_checkpoint
 
-        self.model.save(str(self.save_path))
+        save_checkpoint(
+            self.model,
+            self.save_path,
+            config=self.config,
+            extra={
+                "best_metric": self.metric,
+                "best_score": self.best_score,
+            },
+        )
         save_best_score(self.save_path.parent, self.best_score, metric=self.metric)
-        if self.config is not None:
-            write_checkpoint_metadata(
-                self.save_path,
-                config=self.config,
-                extra={
-                    "best_metric": self.metric,
-                    "best_score": self.best_score,
-                },
-            )
         logger.info(
             "New best %s %.4f -> saved %s",
             self.metric,

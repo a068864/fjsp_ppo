@@ -42,6 +42,7 @@ def test_latest_checkpoint_fires_on_completed_update_boundary(tmp_path: Path):
     cb.num_timesteps = 8  # exactly 2 updates
     cb._on_rollout_end()
     assert len(saved) == 1
+    assert (tmp_path / "latest_model.zip").is_file()
 
 
 def test_best_callback_preserves_existing_score(tmp_path: Path):
@@ -139,7 +140,7 @@ def test_final_training_end_saves_latest(tmp_path: Path):
     )
     cb.model = _FakeModel(saved)
     cb._on_training_end()
-    assert saved and saved[-1].endswith("latest_model.zip")
+    assert (tmp_path / "latest_model.zip").is_file()
 
 
 def test_resume_requires_explicit_trust(tmp_path: Path):

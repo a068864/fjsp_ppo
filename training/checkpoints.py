@@ -54,6 +54,15 @@ def config_fingerprint(config: Mapping[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def file_sha256(path: PathLike) -> str:
+    """SHA-256 of a file (used to bind sidecar metadata to a checkpoint zip)."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def meta_path_for(checkpoint_path: PathLike) -> Path:
     """Sidecar metadata path for a checkpoint zip."""
     path = Path(checkpoint_path)
@@ -104,14 +113,17 @@ def write_checkpoint_metadata(
     extra: Optional[Mapping[str, Any]] = None,
 ) -> Path:
     """Write sidecar metadata next to a checkpoint zip."""
-    meta = {
-        "checkpoint": Path(checkpoint_path).name,
+    path = Path(checkpoint_path)
+    meta: Dict[str, Any] = {
+        "checkpoint": path.name,
         "config_fingerprint": config_fingerprint(config),
         "config": dict(config),
     }
     if extra:
         meta.update(dict(extra))
-    out = meta_path_for(checkpoint_path)
+    if path.is_file():
+        meta["zip_sha256"] = file_sha256(path)
+    out = meta_path_for(path)
     atomic_write_json(out, meta)
     return out
 
@@ -195,6 +207,43 @@ def assert_config_compatible(
             f"Cannot resume from {checkpoint_path}: config fingerprint mismatch "
             f"(checkpoint={actual[:12]}..., current={expected[:12]}...)."
         )
+    zip_path = Path(checkpoint_path)
+    if not zip_path.is_file():
+        raise ValueError(f"Cannot resume from {checkpoint_path}: missing zip")
+    expected_zip = file_sha256(zip_path)
+    actual_zip = str(meta.get("zip_sha256", ""))
+    if actual_zip != expected_zip:
+        raise ValueError(
+            f"Cannot resume from {checkpoint_path}: zip hash mismatch "
+            "(file was replaced or metadata is stale)."
+        )
+
+
+def atomic_save_sb3(model: Any, path: PathLike) -> None:
+    """Save an SB3 zip via a temp file in the destination directory, then replace."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp.zip")
+    try:
+        model.save(str(tmp))
+        atomic_replace(tmp, path)
+    except Exception:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise
+
+
+def save_checkpoint(
+    model: Any,
+    path: PathLike,
+    *,
+    config: Optional[Mapping[str, Any]] = None,
+    extra: Optional[Mapping[str, Any]] = None,
+) -> None:
+    """Atomically save an SB3 zip, then write sidecar metadata when config is given."""
+    atomic_save_sb3(model, path)
+    if config is not None:
+        write_checkpoint_metadata(path, config=config, extra=extra)
 
 
 __all__ = [
@@ -202,15 +251,18 @@ __all__ = [
     "CHECKPOINT_META_SUFFIX",
     "assert_config_compatible",
     "atomic_replace",
+    "atomic_save_sb3",
     "atomic_write_bytes",
     "atomic_write_json",
     "best_score_path",
     "config_fingerprint",
+    "file_sha256",
     "load_best_score",
     "load_best_score_record",
     "material_config",
     "meta_path_for",
     "read_checkpoint_metadata",
     "save_best_score",
+    "save_checkpoint",
     "write_checkpoint_metadata",
 ]

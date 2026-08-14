@@ -247,11 +247,10 @@ def train(cfg: Optional[TrainConfig] = None, args: Optional[argparse.Namespace] 
             reset_num_timesteps=not (cfg.resume and checkpoint_exists(cfg.latest_model_path())),
         )
 
-        from training.checkpoints import write_checkpoint_metadata
+        from training.checkpoints import save_checkpoint
 
         final_path = cfg.latest_model_path()
-        model.save(str(final_path))
-        write_checkpoint_metadata(final_path, config=cfg.to_dict(), extra={"final": True})
+        save_checkpoint(model, final_path, config=cfg.to_dict(), extra={"final": True})
         logger.info("Training complete. Latest model saved to %s", final_path)
         return model
     finally:

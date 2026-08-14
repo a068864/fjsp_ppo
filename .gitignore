@@ -33,6 +33,9 @@ experiments/
 events.out.tfevents.*
 /PPO_*/
 
+# Local Colab helper (kept untracked)
+colab_train.ipynb
+
 # Brainstorm / superpowers session artifacts
 .superpowers/
 *.plan.md

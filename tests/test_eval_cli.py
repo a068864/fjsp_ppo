@@ -21,12 +21,11 @@ def test_apply_shared_eval_args_overrides_env_and_episodes():
     assert cfg.env.avg_operations_per_job == 3
 
 
-def test_build_eval_train_config_disables_reward_norm():
+def test_build_eval_train_config_uses_eval_seed():
     cfg = get_default_eval_config()
     cfg.seed = 11
     train_cfg = build_eval_train_config(cfg)
     assert train_cfg.n_envs == 1
-    assert train_cfg.normalize_reward is False
     assert train_cfg.seed == 11
     assert train_cfg.eval_seed == 11
     assert train_cfg.env.n_machines == cfg.env.n_machines

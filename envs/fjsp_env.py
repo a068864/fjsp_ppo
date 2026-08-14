@@ -399,11 +399,13 @@ class FJSPEnv(gym.Env):
         def _reaches(src: int, dst: int) -> bool:
             return ((reach[src] >> dst) & 1) != 0
 
-        def _try_add(u: int, v: int, dep_type: str) -> bool:
+        def _try_add(u: int, v: int, dep_type: str, *, allow_transitive: bool = False) -> bool:
             pair = (u, v)
             if pair in seen_pairs:
                 return False
-            if _reaches(v, u) or _reaches(u, v):
+            if _reaches(v, u):
+                return False
+            if _reaches(u, v) and not allow_transitive:
                 return False
             deps.append((u, v, dep_type))
             adj[u].append(v)
@@ -419,8 +421,8 @@ class FJSPEnv(gym.Env):
                 u, v = job_sequence[i], job_sequence[i + 1]
                 _try_add(u, v, "sequential")
 
-        # Within-job forward skips cannot cycle on a single chain; still guard
-        # with reachability so future structural changes stay safe.
+        # Skip edges are transitive on a chain; still add them so shared_dep_prob
+        # and OP_PAR_DEPS are live. Cycle check remains.
         for job_sequence in self.job_sequences:
             job_length = len(job_sequence)
             for i in range(job_length - 2):
@@ -428,7 +430,7 @@ class FJSPEnv(gym.Env):
                     if self.np_rng.rand() >= self.shared_dep_prob:
                         continue
                     u, v = job_sequence[i], job_sequence[j]
-                    _try_add(u, v, "parallel")
+                    _try_add(u, v, "parallel", allow_transitive=True)
 
         pair_deps = [(f, t) for f, t, _ in deps]
         op_order = self._get_topological_order(pair_deps, all_ops)
@@ -781,14 +783,17 @@ class FJSPEnv(gym.Env):
                     indeg[v] -= 1
                     if indeg[v] == 0:
                         queue.append(v)
+            rem = remaining.detach().tolist()
+            fin = finished.detach().tolist()
+            cp_list = [0.0 if fin[i] else float(rem[i]) for i in range(n)]
             for u in reversed(order):
-                if bool(finished[u].item()):
-                    cp[u] = self._zero
+                if fin[u]:
                     continue
                 best = 0.0
                 for v in succ[u]:
-                    best = max(best, float(cp[v].item()))
-                cp[u] = remaining[u] + best
+                    best = max(best, cp_list[v])
+                cp_list[u] = float(rem[u]) + best
+            cp = torch.tensor(cp_list, dtype=op_x.dtype, device=op_x.device)
         op_x[:, OP_CP_REMAINING] = cp
 
     def _compute_action_mask(self, state: Optional[HeteroData] = None) -> np.ndarray:
@@ -936,9 +941,9 @@ class FJSPEnv(gym.Env):
         machines = edge_index[0]
         ops = edge_index[1]
         n_edges = int(machines.numel())
-        order = torch.arange(n_edges, device=self.device)
+        order = torch.arange(n_edges, dtype=torch.int32, device=self.device)
         first = torch.full(
-            (self.n_machines,), n_edges, dtype=torch.long, device=self.device
+            (self.n_machines,), n_edges, dtype=torch.int32, device=self.device
         )
         first.scatter_reduce_(0, machines.long(), order, reduce="amin")
         busy = first < n_edges
@@ -1173,6 +1178,7 @@ class FJSPEnv(gym.Env):
             float(self.time_penalty)
             * float(self.n_operations)
             * float(self.max_operation_duration)
+            * float(self.time_step)
             * 4.0
         )
 
