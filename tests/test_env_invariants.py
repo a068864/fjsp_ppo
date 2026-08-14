@@ -142,6 +142,110 @@ def test_tick_subtracts_only_actual_work_no_fraction_transfer():
     env.close()
 
 
+def test_reset_dependency_graph_is_seed_stable():
+    env = FJSPEnv(n_machines=5, n_jobs=3, avg_operations_per_job=4, seed=0, device="cpu")
+    env.reset(seed=0)
+    got = sorted(env.dependency_types.items())
+    expected = [
+        ((0, 9), "sequential"),
+        ((0, 11), "cross_job"),
+        ((1, 7), "sequential"),
+        ((2, 11), "sequential"),
+        ((3, 0), "sequential"),
+        ((3, 2), "cross_job"),
+        ((4, 7), "cross_job"),
+        ((4, 8), "cross_job"),
+        ((4, 10), "sequential"),
+        ((5, 3), "sequential"),
+        ((5, 6), "cross_job"),
+        ((6, 2), "sequential"),
+        ((7, 5), "sequential"),
+        ((9, 11), "cross_job"),
+        ((10, 0), "cross_job"),
+        ((10, 6), "sequential"),
+    ]
+    assert got == expected
+    env.close()
+
+
+def test_advance_multiple_ticks_matches_repeated_single():
+    env = FJSPEnv(n_machines=2, n_jobs=1, avg_operations_per_job=2, seed=0, device="cpu")
+    env.reset(seed=0)
+    env.eligibility_matrix[:, :] = True
+    env.efficiency_modifiers[:, :] = 1.0
+    env.dependency_types = {}
+    env.state["operation", "precede", "operation"].edge_index = torch.empty(
+        (2, 0), dtype=torch.long, device=env.device
+    )
+    env.state["operation"].x[:, :] = 0
+    env.state["operation"].x[:, 0] = torch.tensor([3.0, 5.0], device=env.device)
+    env.state["operation"].x[:, OP_REMAINING] = torch.tensor([3.0, 5.0], device=env.device)
+    env.state["machine"].x[:] = 0
+    env.schedule_operation(0, 0)
+    env.schedule_operation(1, 1)
+    snapshot = env.state.clone()
+    t0 = env.current_time
+
+    env.state = snapshot.clone()
+    env.current_time = t0
+    for _ in range(3):
+        env._advance_time_tick()
+    x_single = env.state["operation"].x.clone()
+    m_single = env.state["machine"].x.clone()
+    t_single = env.current_time
+
+    env.state = snapshot.clone()
+    env.current_time = t0
+    env._advance_time_ticks(3)
+    assert env.current_time == pytest.approx(t_single)
+    assert torch.allclose(env.state["operation"].x, x_single, atol=1e-5)
+    assert torch.allclose(env.state["machine"].x, m_single, atol=1e-5)
+    env.close()
+
+
+def test_advance_multiple_ticks_respects_queue_and_no_fraction_transfer():
+    env = FJSPEnv(
+        n_machines=1,
+        n_jobs=1,
+        avg_operations_per_job=2,
+        seed=0,
+        device="cpu",
+        min_eligible_machines=1,
+    )
+    env.reset(seed=0)
+    env.eligibility_matrix[:, :] = True
+    env.efficiency_modifiers[:, :] = 1.0
+    env.dependency_types = {}
+    env.state["operation", "precede", "operation"].edge_index = torch.empty(
+        (2, 0), dtype=torch.long, device=env.device
+    )
+    env.state["operation"].x[:, :] = 0
+    env.state["operation"].x[:, 0] = torch.tensor([0.4, 5.0], device=env.device)
+    env.state["operation"].x[:, OP_REMAINING] = torch.tensor([0.4, 5.0], device=env.device)
+    env.state["machine"].x[:] = 0
+    env.schedule_operation(0, 0)
+    env.schedule_operation(0, 1)
+    snapshot = env.state.clone()
+    t0 = env.current_time
+
+    env.state = snapshot.clone()
+    env.current_time = t0
+    for _ in range(3):
+        env._advance_time_tick()
+    x_single = env.state["operation"].x.clone()
+    t_single = env.current_time
+
+    env.state = snapshot.clone()
+    env.current_time = t0
+    env._advance_time_ticks(3)
+    assert env.current_time == pytest.approx(t_single)
+    assert torch.allclose(env.state["operation"].x, x_single, atol=1e-5)
+    # Front completed on tick 1; leftover tick capacity must not hit op 1 that tick.
+    # After 3 ticks op 1 has been processed for 2 ticks only.
+    assert float(env.state["operation"].x[1, OP_REMAINING].item()) == pytest.approx(3.0)
+    env.close()
+
+
 def test_rollout_matches_repeated_tick_advance():
     env = FJSPEnv(n_machines=2, n_jobs=1, avg_operations_per_job=2, seed=0, device="cpu")
     env.reset(seed=0)

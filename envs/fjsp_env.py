@@ -211,6 +211,12 @@ class FJSPEnv(gym.Env):
         self.last_success = False
         self._episode_steps = 0
         self._cached_action_mask: Optional[np.ndarray] = None
+        self._zero = torch.tensor(0.0, device=self.device)
+        self._one = torch.tensor(1.0, device=self.device)
+        self._done_status = torch.tensor([0.0, 0.0, 1.0], device=self.device)
+        self._front_machines = torch.empty(0, dtype=torch.long, device=self.device)
+        self._front_ops = torch.empty(0, dtype=torch.long, device=self.device)
+        self._front_can_process = torch.empty(0, dtype=torch.bool, device=self.device)
 
         self.action_space = spaces.Discrete(self.n_machines * self.n_operations)
         self.observation_space = GraphObsSpace(self.n_machines * self.n_operations)
@@ -382,19 +388,25 @@ class FJSPEnv(gym.Env):
         deps: List[Tuple[int, int, str]] = []
         adj: Dict[int, List[int]] = {op: [] for op in all_ops}
         seen_pairs: Set[Tuple[int, int]] = set()
+        # Transitive closure bitsets: reach[u] bit v set iff u can reach v (incl. self).
+        reach: Dict[int, int] = {op: 1 << op for op in all_ops}
+
+        def _reaches(src: int, dst: int) -> bool:
+            return ((reach[src] >> dst) & 1) != 0
 
         def _try_add(u: int, v: int, dep_type: str) -> bool:
             pair = (u, v)
             if pair in seen_pairs:
                 return False
-            if self._can_reach(adj, v, u):
-                return False
-            if self._can_reach(adj, u, v):
-                # Already ordered/redundant along an existing path.
+            if _reaches(v, u) or _reaches(u, v):
                 return False
             deps.append((u, v, dep_type))
             adj[u].append(v)
             seen_pairs.add(pair)
+            rv = reach[v]
+            for src, bits in reach.items():
+                if (bits >> u) & 1:
+                    reach[src] = bits | rv
             return True
 
         for job_sequence in self.job_sequences:
@@ -435,9 +447,8 @@ class FJSPEnv(gym.Env):
                     continue
                 if op_order[to_op] <= op_order[from_op]:
                     continue
-                if self._can_reach(adj, to_op, from_op):
-                    continue
-                if self._can_reach(adj, from_op, to_op):
+                # Rank filter already forbids a cycle; skip transitive duplicates.
+                if _reaches(from_op, to_op):
                     continue
                 eligible_targets.append(to_op)
 
@@ -560,19 +571,18 @@ class FJSPEnv(gym.Env):
                     elif dep_type == "cross_job":
                         cross_job_deps[to_op] += 1
 
-            compatible_edges = []
-            # List to store edge attributes for 'compatible' edges
-            compatible_edge_features = []
-
-            for op in range(self.n_operations):
-                eligible_mask = self.eligibility_matrix[op]
-                if eligible_mask.any():
-                    eligible_machines = torch.where(eligible_mask)[0]
-
-                    for machine in eligible_machines:
-                        compatible_edges.append([op, machine])
-                        # Store efficiency modifier as edge feature
-                        compatible_edge_features.append([self.efficiency_modifiers[op, machine].item()])
+            compatible_pairs = self.eligibility_matrix.nonzero(as_tuple=False)
+            if compatible_pairs.numel() > 0:
+                self.state["operation", "compatible", "machine"].edge_index = (
+                    compatible_pairs.t().contiguous()
+                )
+                self.state["operation", "compatible", "machine"].edge_attr = (
+                    self.efficiency_modifiers[
+                        compatible_pairs[:, 0], compatible_pairs[:, 1]
+                    ]
+                    .unsqueeze(-1)
+                    .to(torch.float32)
+                )
 
             # Initialize operation features
             self.state['operation'].x = torch.cat([
@@ -593,17 +603,6 @@ class FJSPEnv(gym.Env):
             self.state['operation', 'precede', 'operation'].edge_index = edge_index
             self.state['operation', 'next', 'operation'].edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
             self.state['machine', 'processing', 'operation'].edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
-
-            # Set efficiency edge with edge features
-            if compatible_edges:
-                self.state['operation', 'compatible', 'machine'].edge_index = torch.tensor(
-                    compatible_edges, dtype=torch.long, device=self.device
-                ).t()
-
-                # Set edge attributes for 'compatible' edges
-                self.state['operation', 'compatible', 'machine'].edge_attr = torch.tensor(
-                    compatible_edge_features, dtype=torch.float32, device=self.device
-                )
 
             # Store the initial state and the seed used to generate it
             self.initial_state = self.state.clone()
@@ -634,94 +633,87 @@ class FJSPEnv(gym.Env):
         info = self._get_info(success=False, action_mask=obs["action_mask"])
         return obs, info
 
-    def _remove_operation_edges(self, operation: int):
-        """
-        Remove all edges connected to a completed operation.
+    _MUTABLE_EDGE_TYPES = (
+        ("machine", "processing", "operation"),
+        ("operation", "processed_by", "machine"),
+        ("operation", "next", "operation"),
+        ("operation", "precede", "operation"),
+    )
 
-        Decrements successor dependency feature counts before removing
-        outgoing precedence edges.
-        """
+    def _remove_operation_edges(self, operation: int):
+        """Remove all edges connected to a completed operation."""
+        self._remove_operations_edges([int(operation)])
+
+    def _remove_operations_edges(self, operations: List[int]) -> None:
+        """Batch-remove edges for completed operations; decrement successor dep counts."""
+        if not operations:
+            return
+        dead = torch.zeros(self.n_operations, dtype=torch.bool, device=self.device)
+        dead[torch.tensor(operations, dtype=torch.long, device=self.device)] = True
+
         precede_key = ("operation", "precede", "operation")
         if precede_key in self.state.edge_index_dict:
             edge_index = self.state[precede_key].edge_index
             if edge_index.numel() > 0:
-                successors = edge_index[1][edge_index[0] == operation]
-                op_x = self.state["operation"].x
-                for succ in successors.tolist():
-                    dep_type = self.dependency_types.get((operation, int(succ)))
-                    if dep_type == "sequential":
-                        op_x[succ, OP_SEQ_DEPS] = torch.maximum(
-                            op_x[succ, OP_SEQ_DEPS] - 1, torch.tensor(0.0, device=self.device)
+                dying = dead[edge_index[0]]
+                if bool(dying.any().item()):
+                    op_x = self.state["operation"].x
+                    for src, succ in zip(
+                        edge_index[0][dying].tolist(),
+                        edge_index[1][dying].tolist(),
+                    ):
+                        dep_type = self.dependency_types.get((int(src), int(succ)))
+                        col = (
+                            OP_SEQ_DEPS
+                            if dep_type == "sequential"
+                            else OP_PAR_DEPS
+                            if dep_type == "parallel"
+                            else OP_CROSS_DEPS
+                            if dep_type == "cross_job"
+                            else None
                         )
-                    elif dep_type == "parallel":
-                        op_x[succ, OP_PAR_DEPS] = torch.maximum(
-                            op_x[succ, OP_PAR_DEPS] - 1, torch.tensor(0.0, device=self.device)
-                        )
-                    elif dep_type == "cross_job":
-                        op_x[succ, OP_CROSS_DEPS] = torch.maximum(
-                            op_x[succ, OP_CROSS_DEPS] - 1, torch.tensor(0.0, device=self.device)
-                        )
+                        if col is None:
+                            continue
+                        op_x[succ, col] = torch.maximum(op_x[succ, col] - 1, self._zero)
 
-        # Define all possible edge types that could involve the operation
-        edge_types = [
-            ("machine", "processing", "operation"),
-            ("operation", "processed_by", "machine"),
-            ("operation", "next", "operation"),
-            ("operation", "precede", "operation"),
-            ("operation", "compatible", "machine"),
-        ]
-
-        for key in edge_types:
-            # Skip if this edge type doesn't exist in the graph
+        for key in self._MUTABLE_EDGE_TYPES:
             if key not in self.state.edge_index_dict:
                 continue
-
             edge_index = self.state[key].edge_index
-
-            # Skip if empty
             if edge_index.size(1) == 0:
                 continue
+            src_is_op = key[0] == "operation"
+            dst_is_op = key[2] == "operation"
+            mask = torch.ones(edge_index.size(1), dtype=torch.bool, device=self.device)
+            if src_is_op:
+                mask &= ~dead[edge_index[0]]
+            if dst_is_op:
+                mask &= ~dead[edge_index[1]]
+            self._apply_edge_keep_mask(key, mask)
 
-            # Determine the mask to keep edges not connected to this operation
-            if key[0] == "operation" and key[2] == "operation":
-                mask = (edge_index[0] != operation) & (edge_index[1] != operation)
-            elif key[0] == "machine" and key[2] == "operation":
-                mask = edge_index[1] != operation
-            elif key[0] == "operation" and key[2] == "machine":
-                mask = edge_index[0] != operation
-            else:
-                continue
-
-            # If all edges are being removed, set to empty tensor
-            if not mask.any():
-                self.state[key].edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
-                # Clear edge attributes if they exist
-                if hasattr(self.state[key], "edge_attr") and self.state[key].edge_attr is not None:
-                    self.state[key].edge_attr = torch.empty(
-                        (0, self.state[key].edge_attr.size(1)),
-                        dtype=self.state[key].edge_attr.dtype,
-                        device=self.device,
-                    )
-                continue
-
-            # Update edge indices to only keep edges not connected to this operation
-            self.state[key].edge_index = edge_index[:, mask]
-
-            # Update edge attributes if they exist
-            if hasattr(self.state[key], "edge_attr") and self.state[key].edge_attr is not None:
-                # Make sure we have attributes to update
-                if len(self.state[key].edge_attr) == len(mask):
-                    # Filter attributes using the same mask
-                    self.state[key].edge_attr = self.state[key].edge_attr[mask]
-                else:
-                    # Create new edge attributes with correct size
-                    attr_cols = self.state[key].edge_attr.size(1)
-                    self.state[key].edge_attr = torch.zeros(
-                        (mask.sum().item(), attr_cols),
-                        dtype=self.state[key].edge_attr.dtype,
-                        device=self.device,
-                    )
-
+    def _apply_edge_keep_mask(self, key, mask: torch.Tensor) -> None:
+        edge_index = self.state[key].edge_index
+        attr = getattr(self.state[key], "edge_attr", None)
+        if not bool(mask.any().item()):
+            self.state[key].edge_index = torch.empty(
+                (2, 0), dtype=torch.long, device=self.device
+            )
+            if attr is not None:
+                self.state[key].edge_attr = torch.empty(
+                    (0, attr.size(1)), dtype=attr.dtype, device=self.device
+                )
+            return
+        self.state[key].edge_index = edge_index[:, mask]
+        if attr is None:
+            return
+        if len(attr) == len(mask):
+            self.state[key].edge_attr = attr[mask]
+        else:
+            self.state[key].edge_attr = torch.zeros(
+                (int(mask.sum().item()), attr.size(1)),
+                dtype=attr.dtype,
+                device=self.device,
+            )
 
     def _compute_action_mask(self, state: Optional[HeteroData] = None) -> np.ndarray:
         """Vectorized valid-action mask: unscheduled ∧ prereqs started ∧ eligible."""
@@ -790,8 +782,17 @@ class FJSPEnv(gym.Env):
             edge_index = self.state[edge_type].edge_index
             if edge_index is None or edge_index.numel() == 0:
                 continue
-            out[edge_type].edge_index = edge_index.clone()
             edge_attr = getattr(self.state[edge_type], "edge_attr", None)
+            if edge_type == ("operation", "compatible", "machine"):
+                alive = out["operation"].x[:, OP_FINISHED] < 0.5
+                keep = alive[edge_index[0]]
+                if not bool(keep.any().item()):
+                    continue
+                out[edge_type].edge_index = edge_index[:, keep].contiguous()
+                if edge_attr is not None:
+                    out[edge_type].edge_attr = edge_attr[keep].contiguous()
+                continue
+            out[edge_type].edge_index = edge_index.clone()
             if edge_attr is not None:
                 out[edge_type].edge_attr = edge_attr.clone()
         return out
@@ -862,6 +863,9 @@ class FJSPEnv(gym.Env):
             - blocked_machines: Number of machines with front operations that cannot be processed
         """
         processing = torch.zeros(self.n_operations, dtype=torch.bool, device=self.device)
+        self._front_machines = torch.empty(0, dtype=torch.long, device=self.device)
+        self._front_ops = torch.empty(0, dtype=torch.long, device=self.device)
+        self._front_can_process = torch.empty(0, dtype=torch.bool, device=self.device)
         edge_index = self.state["machine", "processing", "operation"].edge_index
         if edge_index.numel() == 0:
             return processing, 0
@@ -877,7 +881,8 @@ class FJSPEnv(gym.Env):
         busy = first < n_edges
         if not bool(busy.any().item()):
             return processing, 0
-        front_ops = ops[first[busy]]
+        front_machines = torch.nonzero(busy, as_tuple=False).view(-1)
+        front_ops = ops[first[front_machines]]
 
         finished = self.state["operation"].x[:, OP_FINISHED] == 1
         prereq_ok = torch.ones(self.n_operations, dtype=torch.bool, device=self.device)
@@ -889,8 +894,115 @@ class FJSPEnv(gym.Env):
 
         can_process = prereq_ok[front_ops]
         processing[front_ops] = can_process
+        self._front_machines = front_machines
+        self._front_ops = front_ops
+        self._front_can_process = can_process
         blocked_machines = int((~can_process).sum().item())
         return processing, blocked_machines
+
+    def _ticks_to_next_completion(self, processing_ops: torch.Tensor) -> int:
+        remaining = self.state["operation"].x[processing_ops, OP_REMAINING]
+        dt = float(self.time_step)
+        ticks = torch.ceil((remaining - 1e-6).clamp(min=0.0) / dt)
+        return max(1, int(ticks.min().item()))
+
+    def _stamp_idle_fronts(self) -> None:
+        if self._front_machines.numel() == 0:
+            return
+        idle = self._front_machines[~self._front_can_process]
+        if idle.numel() > 0:
+            self.state["machine"].x[idle, 2] = self.current_time
+
+    def _apply_processing_work(
+        self, n_ticks: int, processing_ops: torch.Tensor
+    ) -> List[int]:
+        """Apply ``n_ticks`` of work to current fronts. Completions only at the end."""
+        dt = float(self.time_step) * int(n_ticks)
+        dt_t = torch.tensor(dt, device=self.device)
+        self.current_time += dt
+        self._stamp_idle_fronts()
+        if not bool(processing_ops.any().item()):
+            return []
+
+        op_features = self.state["operation"].x
+        can_m = self._front_machines[self._front_can_process]
+        can_ops = self._front_ops[self._front_can_process]
+        rem_front = op_features[can_ops, OP_REMAINING]
+        work_front = torch.minimum(rem_front, dt_t)
+        if can_m.numel() > 0:
+            self.state["machine"].x[can_m, 1] = torch.maximum(
+                self.state["machine"].x[can_m, 1] - work_front, self._zero
+            )
+
+        op_features[:, OP_PROCESSING] = self._zero
+        op_features[can_ops, OP_PROCESSING] = self._one
+        op_features[can_ops, OP_REMAINING] = torch.maximum(
+            rem_front - work_front, self._zero
+        )
+        op_features[can_ops, OP_PROGRESS] = torch.clamp(
+            1
+            - torch.div(
+                op_features[can_ops, OP_REMAINING],
+                op_features[can_ops, OP_DURATION],
+            ),
+            min=self._zero,
+            max=self._one,
+        )
+
+        completed = processing_ops & (
+            (op_features[:, OP_REMAINING] <= 1e-6)
+            | (op_features[:, OP_PROGRESS] >= 1 - 1e-6)
+        )
+        if not bool(completed.any().item()):
+            return []
+
+        op_features[completed, OP_PROGRESS] = self._one
+        op_features[completed, OP_REMAINING] = self._zero
+        op_features[completed, OP_SCHEDULED : OP_FINISHED + 1] = self._done_status
+        op_features[completed, OP_SEQ_DEPS : OP_CROSS_DEPS + 1] = self._zero
+
+        done_on_front = completed[can_ops]
+        done_machines = can_m[done_on_front]
+        if done_machines.numel() > 0:
+            self.state["machine"].x[done_machines, 0] = torch.maximum(
+                self.state["machine"].x[done_machines, 0] - 1, self._zero
+            )
+            newly_idle = done_machines[self.state["machine"].x[done_machines, 0] == 0]
+            if newly_idle.numel() > 0:
+                self.state["machine"].x[newly_idle, 2] = self.current_time
+
+        completed_ids = [int(i) for i in torch.where(completed)[0].tolist()]
+        self._remove_operations_edges(completed_ids)
+        op_features[:, OP_SEQ_DEPS : OP_CROSS_DEPS + 1] = torch.maximum(
+            op_features[:, OP_SEQ_DEPS : OP_CROSS_DEPS + 1], self._zero
+        )
+        return completed_ids
+
+    def _advance_time_tick(self) -> List[int]:
+        """Advance simulation by one fixed ``time_step`` and complete finished ops."""
+        return self._advance_time_ticks(1)
+
+    def _advance_time_ticks(self, n_ticks: int) -> List[int]:
+        """Advance ``n_ticks`` discrete steps, jumping between completion events.
+
+        A jump never crosses a completion, so a queued successor cannot start in
+        the same interval that its predecessor finishes (no unused-tick transfer).
+        """
+        left = int(n_ticks)
+        if left <= 0:
+            return []
+        completed_all: List[int] = []
+        dt = float(self.time_step)
+        while left > 0:
+            processing_ops, _blocked = self._get_processing_operations()
+            if not bool(processing_ops.any().item()):
+                self.current_time += left * dt
+                self._stamp_idle_fronts()
+                break
+            k = min(left, self._ticks_to_next_completion(processing_ops))
+            completed_all.extend(self._apply_processing_work(k, processing_ops))
+            left -= k
+        return completed_all
 
     def _add_edge(self, edge_type: str, src: int, dst: int, edge_attr=None):
         """
@@ -924,9 +1036,6 @@ class FJSPEnv(gym.Env):
             return
 
         edge_index = self.state[key].edge_index
-        if ((edge_index[0] == src) & (edge_index[1] == dst)).any():
-            return
-
         self.state[key].edge_index = torch.cat([edge_index, edge], dim=1)
         if edge_attr is not None:
             if getattr(self.state[key], "edge_attr", None) is not None:
@@ -1007,107 +1116,6 @@ class FJSPEnv(gym.Env):
     def _completion_delta_reward(self, before: float, after: float) -> float:
         return float(self.time_penalty) * (float(after) - float(before))
 
-    def _advance_time_tick(self) -> List[int]:
-        """Advance simulation by one fixed ``time_step`` and complete finished ops.
-
-        Only actual processed work is subtracted from remaining time and machine
-        workload. Unused fractional tick capacity is not transferred to the next
-        queued operation within the same tick.
-
-        Returns:
-            List of operation indices completed during this tick.
-        """
-        zero_tensor = torch.tensor(0.0, device=self.device)
-        one_tensor = torch.tensor(1.0, device=self.device)
-        time_step = float(self.time_step)
-        time_step_tensor = torch.tensor(time_step, device=self.device)
-
-        self.current_time += time_step
-
-        processing_ops, _blocked = self._get_processing_operations()
-        proc_edges = self.state["machine", "processing", "operation"].edge_index
-
-        if proc_edges.numel() > 0:
-            for machine_id in proc_edges[0].unique():
-                machine_mask = proc_edges[0] == machine_id
-                queue_ops = proc_edges[1][machine_mask]
-                if len(queue_ops) > 0:
-                    front_op = queue_ops[0].item()
-                    if not processing_ops[front_op]:
-                        self.state["machine"].x[machine_id, 2] = self.current_time
-
-        if not processing_ops.any():
-            return []
-
-        op_features = self.state["operation"].x
-        processing_indices = torch.where(processing_ops)[0]
-        remaining = op_features[processing_indices, OP_REMAINING]
-        work = torch.minimum(remaining, time_step_tensor)
-
-        # Map each processing op to its machine (front of that machine's queue).
-        if proc_edges.numel() > 0:
-            for op_id, delta in zip(processing_indices.tolist(), work.tolist()):
-                op_mask = proc_edges[1] == op_id
-                if not op_mask.any():
-                    continue
-                machine_id = proc_edges[0][op_mask][0].item()
-                self.state["machine"].x[machine_id, 1] = torch.maximum(
-                    self.state["machine"].x[machine_id, 1] - float(delta),
-                    zero_tensor,
-                )
-
-        op_features[:, OP_PROCESSING] = zero_tensor
-        op_features[processing_ops, OP_PROCESSING] = one_tensor
-        op_features[processing_indices, OP_REMAINING] = torch.maximum(
-            remaining - work, zero_tensor
-        )
-        op_features[processing_ops, OP_PROGRESS] = torch.clamp(
-            1
-            - torch.div(
-                op_features[processing_ops, OP_REMAINING],
-                op_features[processing_ops, OP_DURATION],
-            ),
-            min=zero_tensor,
-            max=one_tensor,
-        )
-
-        completed = processing_ops & (
-            (op_features[:, OP_REMAINING] <= 1e-6)
-            | (op_features[:, OP_PROGRESS] >= 1 - 1e-6)
-        )
-        op_features[completed, OP_PROGRESS] = one_tensor
-        op_features[completed, OP_REMAINING] = zero_tensor
-        completed_ids: List[int] = []
-
-        if completed.any():
-            for op_id in torch.where(completed)[0].tolist():
-                completed_ids.append(int(op_id))
-                op_features[op_id, OP_SCHEDULED : OP_FINISHED + 1] = torch.tensor(
-                    [0.0, 0.0, 1.0], device=self.device
-                )
-                op_features[op_id, OP_SEQ_DEPS : OP_CROSS_DEPS + 1] = zero_tensor
-
-                proc_edges = self.state["machine", "processing", "operation"].edge_index
-                if proc_edges.numel() > 0:
-                    op_mask = proc_edges[1] == op_id
-                    if op_mask.any():
-                        machine_id = proc_edges[0][op_mask][0].item()
-                        self.state["machine"].x[machine_id, 0] -= 1
-                        self.state["machine"].x[machine_id, 0] = torch.maximum(
-                            self.state["machine"].x[machine_id, 0],
-                            zero_tensor,
-                        )
-                        if self.state["machine"].x[machine_id, 0] == 0:
-                            self.state["machine"].x[machine_id, 2] = self.current_time
-
-                self._remove_operation_edges(op_id)
-
-            op_features[:, OP_SEQ_DEPS : OP_CROSS_DEPS + 1] = torch.maximum(
-                op_features[:, OP_SEQ_DEPS : OP_CROSS_DEPS + 1], zero_tensor
-            )
-
-        return completed_ids
-
     def step(
         self,
         action: int,
@@ -1125,15 +1133,19 @@ class FJSPEnv(gym.Env):
         else:
             machine, operation = unflatten_action(int(np.asarray(action).item()), self.n_operations)
 
-        self._cached_action_mask = None
-        pair = (machine, operation)
-        if not (0 <= machine < self.n_machines and 0 <= operation < self.n_operations) or not self._is_valid_action(pair):
+        in_range = 0 <= machine < self.n_machines and 0 <= operation < self.n_operations
+        mask = self._cached_action_mask
+        if mask is None:
+            mask = self._compute_action_mask()
+        flat = machine * self.n_operations + operation
+        if not in_range or flat >= mask.size or float(mask[flat]) <= 0.0:
             raise ValueError(
                 f"Invalid action: (m:{machine}, op:{operation}). "
                 f"Eligible machines for operation {operation}: "
-                f"{self.get_eligible_machines(operation)}; "
+                f"{self.get_eligible_machines(operation) if in_range else []}; "
                 f"valid_actions={self.get_valid_actions()[:20]}"
             )
+        self._cached_action_mask = None
         self._episode_steps += 1
 
         before = self.estimated_completion()
@@ -1152,7 +1164,7 @@ class FJSPEnv(gym.Env):
             info["is_gridlock"] = True
             return obs, float(reward), True, False, info
 
-        self._advance_time_tick()
+        self._apply_processing_work(1, processing_ops)
         reward = self._completion_delta_reward(before, self.estimated_completion())
 
         # Detect gridlock after the tick (e.g. newly blocked fronts).
@@ -1183,7 +1195,6 @@ class FJSPEnv(gym.Env):
         info = self._get_info(success=False, action_mask=obs["action_mask"])
         if float(np.sum(obs["action_mask"])) <= 0.0:
             info["no_valid_actions"] = True
-            processing_ops, blocked_machines = self._get_processing_operations()
             if self._is_gridlock(processing_ops, blocked_machines):
                 info["is_gridlock"] = True
             return obs, float(reward + self.failure_penalty()), True, False, info
@@ -1192,10 +1203,8 @@ class FJSPEnv(gym.Env):
     def rollout(self) -> Tuple[float, bool]:
         """Simulate remaining execution under FIFO queue assumption.
 
-        Uses the same fixed-tick advancement as ``step``.
-
-        Returns:
-            Cumulative rollout reward and whether all operations completed.
+        Jumps to the next completion event; each jump equals the same number of
+        fixed ``time_step`` ticks ``step`` would have applied.
         """
         reward = 0.0
         guard = 0
@@ -1203,34 +1212,36 @@ class FJSPEnv(gym.Env):
 
         while True:
             op_features = self.state["operation"].x
-            finished_ops = op_features[:, OP_FINISHED] > 0.5
-            if bool(torch.all(finished_ops).item()):
+            if bool(torch.all(op_features[:, OP_FINISHED] > 0.5).item()):
                 return reward, True
 
             proc_edges = self.state["machine", "processing", "operation"].edge_index
             if proc_edges.numel() == 0:
                 return reward, False
 
-            processing_ops, blocked_machines = self._get_processing_operations()
-            if not processing_ops.any():
+            processing_ops, _blocked = self._get_processing_operations()
+            if not bool(processing_ops.any().item()):
+                return reward, False
+            if guard >= max_ticks:
                 return reward, False
 
+            k = min(self._ticks_to_next_completion(processing_ops), max_ticks - guard)
+            k = max(1, k)
             before = self.estimated_completion()
-            self._advance_time_tick()
+            self._apply_processing_work(k, processing_ops)
             reward += self._completion_delta_reward(before, self.estimated_completion())
-            guard += 1
+            guard += k
             if guard > max_ticks:
                 return reward, False
 
     def terminal(self) -> bool:
         """Return True when every operation has left the initial state."""
-        one_tensor = torch.tensor(1.0, device=self.device)
         op_x = self.state["operation"].x
         return bool(
             torch.all(
-                (op_x[:, OP_SCHEDULED] == one_tensor)
-                | (op_x[:, OP_PROCESSING] == one_tensor)
-                | (op_x[:, OP_FINISHED] == one_tensor)
+                (op_x[:, OP_SCHEDULED] == self._one)
+                | (op_x[:, OP_PROCESSING] == self._one)
+                | (op_x[:, OP_FINISHED] == self._one)
             ).item()
         )
 
