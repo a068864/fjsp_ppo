@@ -274,18 +274,13 @@ class FJSPEvalCallback(BaseCallback):
             deterministic=self.deterministic,
         )
         self.best_callback.model = self.model
-        score = (
-            result.mean_makespan
-            if self.best_callback.metric == "mean_makespan"
-            else result.mean_reward
-        )
+        score = result.mean_makespan
         # Heuristics are 100% success; don't crown a partial-success makespan.
-        if self.best_callback.metric == "mean_makespan" and result.success_rate < 1.0:
+        if result.success_rate < 1.0:
             score = float("inf")
         self.best_callback.update(score)
 
         if self.logger is not None:
-            self.logger.record("eval/mean_reward", result.mean_reward)
             self.logger.record("eval/mean_makespan", result.mean_makespan)
             self.logger.record("eval/mean_ep_length", result.mean_ep_length)
             self.logger.record("eval/success_rate", result.success_rate)

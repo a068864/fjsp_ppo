@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import pulp
@@ -33,6 +33,7 @@ class MilpResult:
     makespan: float
     solve_time_s: float
     assignment: Optional[Tuple[Tuple[int, int], ...]] = None  # (op, machine)
+    starts: Optional[Tuple[float, ...]] = None  # processing start per operation
 
 
 def extract_fjsp_instance(env: FJSPEnv) -> FJSPInstance:
@@ -53,7 +54,9 @@ def extract_fjsp_instance(env: FJSPEnv) -> FJSPInstance:
         src = dep[0].detach().cpu().numpy()
         dst = dep[1].detach().cpu().numpy()
         for a, b in zip(src.tolist(), dst.tolist()):
-            precedences.append((int(a), int(b)))
+            pair = (int(a), int(b))
+            if pair not in precedences:
+                precedences.append(pair)
 
     return FJSPInstance(
         n_operations=n_ops,
@@ -118,9 +121,13 @@ def solve_makespan(
         p_i = pulp.lpSum(float(proc[i, m]) * x[i, m] for m in eligible_m)
         prob += cmax >= start[i] + p_i, f"cmax_{i}"
 
+    seen_prec: set[Tuple[int, int]] = set()
     for pred, succ in instance.precedences:
         if not (0 <= pred < n_ops and 0 <= succ < n_ops):
             raise ValueError(f"precedence out of range: {(pred, succ)}")
+        if (pred, succ) in seen_prec:
+            continue
+        seen_prec.add((pred, succ))
         p_pred = pulp.lpSum(
             float(proc[pred, m]) * x[pred, m]
             for m in machines
@@ -181,29 +188,156 @@ def solve_makespan(
             if var.varValue is not None and float(var.varValue) > 0.5
         )
     )
+    starts = tuple(
+        float(pulp.value(start[i]) or 0.0) for i in ops
+    )
     return MilpResult(
         status=status,
         makespan=makespan,
         solve_time_s=float(solve_time_s),
         assignment=assignment,
+        starts=starts,
     )
 
 
-def milp_episode_metrics(instance: FJSPInstance, result: MilpResult) -> dict:
-    """Map a MILP solve into EvalResult-compatible episode fields."""
-    if result.status == "Optimal" and np.isfinite(result.makespan):
-        reward = float(instance.time_penalty) * (
-            float(result.makespan) / float(instance.time_step)
+def decode_assignment_schedule(
+    instance: FJSPInstance,
+    assignment_order: Sequence[Tuple[int, int]],
+) -> MilpResult:
+    """Earliest-start classic FJSP schedule for a constructive assignment sequence.
+
+    ``assignment_order`` is ``(operation, machine)`` in decision order. Machine
+    sequences follow that order. Start times are
+    ``max(machine_free, predecessor completions)``. This is the instance
+    schedule a sequential policy infers, not the env tick clock.
+
+    Incomplete or ineligible sequences return status ``Incomplete``.
+    """
+    n_ops = instance.n_operations
+    n_machines = instance.n_machines
+    proc = np.asarray(instance.proc_times, dtype=np.float64)
+    elig = np.asarray(instance.eligibility, dtype=bool)
+    incomplete = MilpResult(
+        status="Incomplete",
+        makespan=float("inf"),
+        solve_time_s=0.0,
+    )
+    order = [(int(op), int(machine)) for op, machine in assignment_order]
+    if len(order) != n_ops or {op for op, _ in order} != set(range(n_ops)):
+        return incomplete
+
+    preds: List[List[int]] = [[] for _ in range(n_ops)]
+    for pred, succ in instance.precedences:
+        preds[int(succ)].append(int(pred))
+
+    starts = np.zeros(n_ops, dtype=np.float64)
+    completions = np.zeros(n_ops, dtype=np.float64)
+    machine_free = np.zeros(n_machines, dtype=np.float64)
+    assigned: dict[int, int] = {}
+    done = [False] * n_ops
+    for op, machine in order:
+        if not (0 <= machine < n_machines) or not bool(elig[op, machine]):
+            return incomplete
+        start = float(machine_free[machine])
+        for pred in preds[op]:
+            if not done[pred]:
+                return incomplete
+            pred_done = float(completions[pred])
+            if pred_done > start:
+                start = pred_done
+        ptime = float(proc[op, machine])
+        starts[op] = start
+        completions[op] = start + ptime
+        machine_free[machine] = completions[op]
+        assigned[op] = machine
+        done[op] = True
+
+    return MilpResult(
+        status="Feasible",
+        makespan=float(completions.max()) if n_ops else 0.0,
+        solve_time_s=0.0,
+        assignment=tuple(sorted(assigned.items())),
+        starts=tuple(float(s) for s in starts),
+    )
+
+
+def validate_milp_schedule(
+    instance: FJSPInstance,
+    result: MilpResult,
+    *,
+    tol: float = 1e-4,
+) -> List[str]:
+    """Return constraint violations for a claimed classic-FJSP schedule.
+
+    Checks assignment, eligibility, finish-to-start precedences, machine
+    non-overlap, and that ``Cmax`` matches the latest completion. Empty list
+    means the returned start times are a feasible classic FJSP schedule.
+    """
+    violations: List[str] = []
+    if result.assignment is None or result.starts is None:
+        return [f"status is {result.status!r}; missing assignment or start times"]
+
+    n_ops = instance.n_operations
+    proc = np.asarray(instance.proc_times, dtype=np.float64)
+    elig = np.asarray(instance.eligibility, dtype=bool)
+    assigned = dict(result.assignment)
+    starts = np.asarray(result.starts, dtype=np.float64)
+    if len(assigned) != n_ops:
+        violations.append(f"assignment covers {len(assigned)} ops, expected {n_ops}")
+    if starts.shape != (n_ops,):
+        violations.append(f"starts shape {starts.shape} != ({n_ops},)")
+        return violations
+
+    completions = np.zeros(n_ops, dtype=np.float64)
+    for i in range(n_ops):
+        if i not in assigned:
+            violations.append(f"op {i} has no machine")
+            continue
+        m = int(assigned[i])
+        if not (0 <= m < instance.n_machines) or not bool(elig[i, m]):
+            violations.append(f"op {i} assigned to ineligible machine {m}")
+            continue
+        if starts[i] < -tol:
+            violations.append(f"op {i} start {starts[i]} < 0")
+        completions[i] = float(starts[i] + proc[i, m])
+
+    latest = float(completions.max()) if n_ops else 0.0
+    if abs(float(result.makespan) - latest) > tol:
+        violations.append(
+            f"Cmax {result.makespan} != latest completion {latest}"
         )
+
+    for pred, succ in instance.precedences:
+        if completions[pred] - starts[succ] > tol:
+            violations.append(
+                f"precedence {pred}->{succ}: start[{succ}]={starts[succ]} "
+                f"< completion[{pred}]={completions[pred]}"
+            )
+
+    by_machine: dict[int, List[int]] = {}
+    for i, m in assigned.items():
+        by_machine.setdefault(int(m), []).append(int(i))
+    for m, ops_on_m in by_machine.items():
+        ordered = sorted(ops_on_m, key=lambda i: (starts[i], i))
+        for a, b in zip(ordered, ordered[1:]):
+            if completions[a] - starts[b] > tol:
+                violations.append(
+                    f"machine {m} overlap: op {a} completes {completions[a]} "
+                    f"but op {b} starts {starts[b]}"
+                )
+    return violations
+
+
+def milp_episode_metrics(instance: FJSPInstance, result: MilpResult) -> dict:
+    """Map a classic FJSP schedule into EvalResult-compatible episode fields."""
+    if result.status in {"Optimal", "Feasible"} and np.isfinite(result.makespan):
         return {
-            "r": reward,
             "l": float(instance.n_operations),
             "makespan": float(result.makespan),
             "success": True,
             "truncated": False,
         }
     return {
-        "r": 0.0,
         "l": float(instance.n_operations),
         "makespan": float("inf"),
         "success": False,
@@ -214,7 +348,9 @@ def milp_episode_metrics(instance: FJSPInstance, result: MilpResult) -> dict:
 __all__ = [
     "FJSPInstance",
     "MilpResult",
+    "decode_assignment_schedule",
     "extract_fjsp_instance",
     "milp_episode_metrics",
     "solve_makespan",
+    "validate_milp_schedule",
 ]

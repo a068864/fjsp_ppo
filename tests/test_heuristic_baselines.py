@@ -100,7 +100,7 @@ def test_heuristic_smoke_rollout():
         env.seed(cfg.seed)
         result = evaluate_heuristic_fjsp(env, rule="SPT", n_episodes=1)
         assert result.n_episodes == 1
-        assert np.isfinite(result.mean_reward)
+        assert np.isfinite(result.mean_makespan)
     finally:
         env.close()
 
@@ -126,7 +126,7 @@ def test_all_heuristics_repeatable_on_held_out_seed():
 
         a = _run()
         b = _run()
-        assert a.mean_reward == pytest.approx(b.mean_reward), rule
+        assert a.mean_makespan == pytest.approx(b.mean_makespan), rule
         assert a.mean_ep_length == pytest.approx(b.mean_ep_length), rule
 
 

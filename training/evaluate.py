@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.vec_env import VecEnv
 
 from heuristics.dispatch_rules import select_heuristic_action
-from solvers.milp import extract_fjsp_instance, milp_episode_metrics, solve_makespan
+from solvers.milp import (
+    decode_assignment_schedule,
+    extract_fjsp_instance,
+    milp_episode_metrics,
+    solve_makespan,
+)
 from utils import get_logger, safe_mean
 
 logger = get_logger(__name__)
@@ -21,8 +26,6 @@ logger = get_logger(__name__)
 class EvalResult:
     """Aggregate metrics from a deterministic (or stochastic) evaluation run."""
 
-    mean_reward: float
-    std_reward: float
     mean_makespan: float
     std_makespan: float
     mean_ep_length: float
@@ -39,7 +42,6 @@ class EvalResult:
         return "\n".join(
             [
                 f"Episodes          : {self.n_episodes}",
-                f"Average reward    : {self.mean_reward:.4f} ± {self.std_reward:.4f}",
                 f"Successful-episode makespan : {self.mean_makespan:.4f} ± {self.std_makespan:.4f}",
                 f"Episode length    : {self.mean_ep_length:.2f} ± {self.std_ep_length:.2f}",
                 f"Success rate      : {self.success_rate:.2%}",
@@ -51,7 +53,6 @@ class EvalResult:
 
 def _episode_from_info(
     info: Dict[str, Any],
-    fallback_reward: float,
     fallback_length: int,
 ) -> Dict[str, Any]:
     """Build episode stats from info, with numeric fallbacks."""
@@ -63,7 +64,6 @@ def _episode_from_info(
         success: bool,
     ) -> Dict[str, Any]:
         out = dict(ep)
-        out.setdefault("r", fallback_reward)
         out.setdefault("l", fallback_length)
         out.setdefault("makespan", makespan)
         out.setdefault("success", success)
@@ -95,16 +95,26 @@ def _require_dummy_vec(env: VecEnv, purpose: str) -> None:
         )
 
 
+def _action_to_pair(action: int, n_operations: int) -> Tuple[int, int]:
+    """Decode flat ``machine * n_ops + op`` into ``(operation, machine)``."""
+    a = int(action)
+    return a % n_operations, a // n_operations
+
+
 def _rollout_eval(
     env: VecEnv,
     n_episodes: int,
     choose_actions: Callable[[Any], Any],
 ) -> EvalResult:
-    """Collect ``n_episodes`` VecEnv rollouts using ``choose_actions(obs)``."""
+    """Collect ``n_episodes`` constructive schedules via ``choose_actions(obs)``.
+
+    The env is only a sequential decoder (ready mask). Reported makespan is
+    classic FJSP Cmax of the inferred assignment sequence.
+    """
     if n_episodes <= 0:
         raise ValueError(f"n_episodes must be positive, got {n_episodes}")
+    _require_dummy_vec(env, "FJSP instance-schedule evaluation")
 
-    episode_rewards: List[float] = []
     episode_lengths: List[float] = []
     episode_makespans: List[float] = []
     episode_successes: List[float] = []
@@ -112,18 +122,24 @@ def _rollout_eval(
     inference_times: List[float] = []
 
     n_envs = env.num_envs
-    running_rewards = np.zeros(n_envs, dtype=np.float64)
     running_lengths = np.zeros(n_envs, dtype=np.int64)
+    orders: List[List[Tuple[int, int]]] = [[] for _ in range(n_envs)]
 
     observations = env.reset()
+    instances = [extract_fjsp_instance(env.envs[i].unwrapped) for i in range(n_envs)]
 
-    while len(episode_rewards) < n_episodes:
+    while len(episode_makespans) < n_episodes:
         start = time.perf_counter()
         actions = choose_actions(observations)
         inference_times.append(time.perf_counter() - start)
 
-        observations, rewards, dones, infos = env.step(actions)
-        running_rewards += np.asarray(rewards, dtype=np.float64)
+        action_arr = np.asarray(actions).reshape(-1)
+        for env_idx, action in enumerate(action_arr):
+            orders[env_idx].append(
+                _action_to_pair(int(action), instances[env_idx].n_operations)
+            )
+
+        observations, _rewards, dones, infos = env.step(actions)
         running_lengths += 1
 
         for env_idx, done in enumerate(np.asarray(dones, dtype=bool)):
@@ -134,28 +150,27 @@ def _rollout_eval(
             if not isinstance(info, dict):
                 info = {}
 
-            ep = _episode_from_info(
-                info,
-                fallback_reward=float(running_rewards[env_idx]),
-                fallback_length=int(running_lengths[env_idx]),
-            )
+            ep = _episode_from_info(info, fallback_length=int(running_lengths[env_idx]))
+            env_success = bool(ep.get("success", False))
+            decoded = decode_assignment_schedule(instances[env_idx], orders[env_idx])
+            success = bool(env_success and decoded.status == "Feasible")
 
-            episode_rewards.append(float(ep.get("r", running_rewards[env_idx])))
             episode_lengths.append(float(ep.get("l", running_lengths[env_idx])))
-            episode_makespans.append(float(ep.get("makespan", float("inf"))))
-            success = bool(ep.get("success", False))
+            episode_makespans.append(
+                float(decoded.makespan) if success else float("inf")
+            )
             episode_successes.append(1.0 if success else 0.0)
             timed_out = bool(ep.get("truncated", info.get("TimeLimit.truncated", False)))
             episode_timeouts.append(1.0 if timed_out and not success else 0.0)
 
-            running_rewards[env_idx] = 0.0
             running_lengths[env_idx] = 0
+            orders[env_idx] = []
+            instances[env_idx] = extract_fjsp_instance(env.envs[env_idx].unwrapped)
 
-            if len(episode_rewards) >= n_episodes:
+            if len(episode_makespans) >= n_episodes:
                 break
 
     return _aggregate_eval(
-        episode_rewards[:n_episodes],
         episode_lengths[:n_episodes],
         episode_makespans[:n_episodes],
         episode_successes[:n_episodes],
@@ -170,16 +185,19 @@ def evaluate_policy_fjsp(
     n_episodes: int = 20,
     deterministic: bool = True,
 ) -> EvalResult:
-    """Run evaluation rollouts and compute FJSP metrics.
+    """Infer classic FJSP schedules with a trained policy.
+
+    The env supplies the sequential action mask; reported makespan is the
+    earliest-start Cmax of the inferred ``(op, machine)`` sequence.
 
     Args:
         model: Trained SB3 model (``PPO`` with ``GraphActorCriticPolicy``).
-        env: Vectorized evaluation environment.
+        env: In-process ``GraphDummyVecEnv`` with ``envs``.
         n_episodes: Number of completed episodes to collect.
         deterministic: If True, use greedy actions.
 
     Returns:
-        ``EvalResult`` with reward, makespan, length, success, and inference time.
+        ``EvalResult`` with classic makespan, length, success, and inference time.
     """
 
     def choose_actions(observations: Any) -> Any:
@@ -201,15 +219,15 @@ def evaluate_random_fjsp(
     n_episodes: int = 20,
     seed: int = 42,
 ) -> EvalResult:
-    """Run evaluation rollouts with uniform random valid actions.
+    """Infer classic FJSP schedules with uniform random valid actions.
 
     Args:
-        env: Vectorized evaluation environment.
+        env: In-process ``GraphDummyVecEnv`` with ``envs``.
         n_episodes: Number of completed episodes to collect.
         seed: RNG seed for action sampling.
 
     Returns:
-        ``EvalResult`` with reward, makespan, length, success, and sampling time.
+        ``EvalResult`` with classic makespan, length, success, and sampling time.
     """
     if n_episodes <= 0:
         raise ValueError(f"n_episodes must be positive, got {n_episodes}")
@@ -234,10 +252,11 @@ def evaluate_heuristic_fjsp(
     rule: str,
     n_episodes: int = 20,
 ) -> EvalResult:
-    """Run evaluation rollouts with a classic dispatching rule.
+    """Infer classic FJSP schedules with a dispatching rule.
 
     Requires an in-process DummyVecEnv exposing ``env.envs`` so rules can read
-    live ``FJSPEnv`` state (``n_envs=1`` recommended).
+    live ``FJSPEnv`` state (``n_envs=1`` recommended). Reported makespan is
+    classic instance Cmax of the inferred assignment sequence.
 
     Args:
         env: Vectorized evaluation environment with ``envs`` attribute.
@@ -245,7 +264,7 @@ def evaluate_heuristic_fjsp(
         n_episodes: Number of completed episodes to collect.
 
     Returns:
-        ``EvalResult`` with reward, makespan, length, success, and select time.
+        ``EvalResult`` with classic makespan, length, success, and select time.
     """
     if n_episodes <= 0:
         raise ValueError(f"n_episodes must be positive, got {n_episodes}")
@@ -294,7 +313,6 @@ def evaluate_milp_fjsp(
     if env.num_envs != 1:
         raise ValueError(f"MILP evaluation requires n_envs=1, got {env.num_envs}")
 
-    episode_rewards: List[float] = []
     episode_lengths: List[float] = []
     episode_makespans: List[float] = []
     episode_successes: List[float] = []
@@ -319,14 +337,12 @@ def evaluate_milp_fjsp(
         inference_times.append(time.perf_counter() - start)
 
         ep = milp_episode_metrics(instance, milp)
-        episode_rewards.append(float(ep["r"]))
         episode_lengths.append(float(ep["l"]))
         episode_makespans.append(float(ep["makespan"]))
         episode_successes.append(1.0 if ep["success"] else 0.0)
         episode_timeouts.append(1.0 if ep.get("truncated") else 0.0)
 
     result = _aggregate_eval(
-        episode_rewards,
         episode_lengths,
         episode_makespans,
         episode_successes,
@@ -379,7 +395,6 @@ def sample_masked_random_actions(
 
 
 def _aggregate_eval(
-    episode_rewards,
     episode_lengths,
     episode_makespans,
     episode_successes,
@@ -389,15 +404,12 @@ def _aggregate_eval(
     n_success = int(sum(1 for s in episode_successes if s > 0.5))
     n_timeout = int(sum(1 for t in episode_timeouts if t > 0.5))
     n_failure = max(0, int(len(episode_successes) - n_success - n_timeout))
-    # Label makespan as successful-episode makespan.
     success_makespans = [
         m
         for m, s in zip(episode_makespans, episode_successes)
         if s > 0.5 and np.isfinite(m)
     ]
     return EvalResult(
-        mean_reward=float(np.mean(episode_rewards)),
-        std_reward=float(np.std(episode_rewards)),
         mean_makespan=float(np.mean(success_makespans))
         if success_makespans
         else float("inf"),
@@ -406,7 +418,7 @@ def _aggregate_eval(
         std_ep_length=float(np.std(episode_lengths)),
         success_rate=float(np.mean(episode_successes)),
         mean_inference_time_s=safe_mean(np.asarray(inference_times, dtype=np.float64)),
-        n_episodes=len(episode_rewards),
+        n_episodes=len(episode_makespans),
         n_success=n_success,
         n_failure=n_failure,
         n_timeout=n_timeout,

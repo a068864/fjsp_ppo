@@ -42,6 +42,6 @@ def test_random_eval_is_repeatable_on_held_out_seed():
 
     a = _run()
     b = _run()
-    assert a.mean_reward == pytest.approx(b.mean_reward)
+    assert a.mean_makespan == pytest.approx(b.mean_makespan)
     assert a.mean_ep_length == pytest.approx(b.mean_ep_length)
 

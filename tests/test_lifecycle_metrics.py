@@ -61,8 +61,6 @@ def test_sample_masked_random_actions_fails_on_empty_mask():
 
 def test_eval_result_reports_success_failure_timeout_counts():
     result = EvalResult(
-        mean_reward=0.0,
-        std_reward=0.0,
         mean_makespan=10.0,
         std_makespan=0.0,
         mean_ep_length=5.0,
@@ -76,6 +74,7 @@ def test_eval_result_reports_success_failure_timeout_counts():
     )
     text = result.format_summary()
     assert "successful-episode makespan" in text.lower() or "Successful-episode makespan" in text
+    assert "reward" not in text.lower()
     assert "success" in text.lower()
     assert result.n_success == 2
     assert result.n_failure == 1

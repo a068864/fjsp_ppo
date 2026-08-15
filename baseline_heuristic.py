@@ -53,17 +53,17 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 def _print_comparison(results: Dict[str, EvalResult]) -> None:
     """Print a compact per-rule comparison table."""
-    print("=" * 72)
-    print(f"{'Rule':<8} {'Reward':>12} {'Makespan':>12} {'Success':>10} {'EpLen':>10}")
-    print("-" * 72)
+    print("=" * 56)
+    print(f"{'Rule':<8} {'Makespan':>12} {'Success':>10} {'EpLen':>10}")
+    print("-" * 56)
     for rule, result in results.items():
         mk = result.mean_makespan
         mk_s = f"{mk:.2f}" if mk != float("inf") else "inf"
         print(
-            f"{rule:<8} {result.mean_reward:12.4f} {mk_s:>12} "
+            f"{rule:<8} {mk_s:>12} "
             f"{result.success_rate:10.2%} {result.mean_ep_length:10.1f}"
         )
-    print("=" * 72)
+    print("=" * 56)
 
 
 def run_baseline(

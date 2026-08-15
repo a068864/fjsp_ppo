@@ -99,7 +99,6 @@ def test_eval_callback_reseeds_held_out_schedule(tmp_path: Path, monkeypatch):
             raise AssertionError("should not step; evaluate is mocked")
 
     class _FakeResult:
-        mean_reward = 0.0
         mean_makespan = 12.0
         mean_ep_length = 1.0
         success_rate = 1.0

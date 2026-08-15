@@ -169,12 +169,13 @@ python evaluate.py --stochastic --trust-checkpoint
 
 Printed metrics:
 
-- Average reward (± std)
-- **Successful-episode makespan** (± std) — only successful episodes
+- **Successful-episode makespan** (± std) — classic FJSP Cmax of the inferred `(op, machine)` sequence (same objective as MILP)
 - Episode length (± std)
 - Success rate
 - Success / failure / timeout counts
 - Mean inference time (ms/step)
+
+The Gym env is only a sequential decoder (ready operations + action mask). Evaluation does **not** score the env tick clock.
 
 Path resolution:
 
@@ -191,7 +192,7 @@ python baseline_random.py --n-episodes 20 --seed 123
 python baseline_random.py --n-machines 10 --n-jobs 8 --avg-ops 6
 ```
 
-Samples uniformly among valid actions from `action_mask`. Empty masks fail fast. Reports the same metric schema as `evaluate.py` (no PPO checkpoint).
+Samples uniformly among valid actions from `action_mask`. Empty masks fail fast. Reports classic instance Cmax of the inferred assignment sequence (same metric schema as `evaluate.py`, no PPO checkpoint).
 
 ## Heuristic baselines
 
@@ -206,7 +207,7 @@ python baseline_heuristic.py --all --n-episodes 5
 python baseline_heuristic.py --rule ECT --n-machines 10 --n-jobs 8 --avg-ops 6
 ```
 
-Requires in-process `GraphDummyVecEnv` (`n_envs=1`). Same metric schema as `evaluate.py` / the random baseline.
+Requires in-process `GraphDummyVecEnv` (`n_envs=1`). Same classic-instance Cmax as `evaluate.py` / the random baseline.
 
 ## MILP baseline (exact)
 
@@ -251,7 +252,7 @@ Checkpoints are written under `./checkpoints/`:
 |-------------------------|-------------------------------------------------|
 | `latest_model.zip`      | Most recent training snapshot                   |
 | `latest_model.zip.meta.json` | Config fingerprint + save metadata         |
-| `best_model.zip`        | Best eval mean reward                           |
+| `best_model.zip`        | Best eval mean makespan                         |
 | `best_score.json`       | Persisted best score (survives resume)          |
 
 - Saves / evals fire on **completed PPO update** boundaries.
