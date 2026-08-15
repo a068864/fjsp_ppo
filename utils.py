@@ -6,7 +6,7 @@ import logging
 import os
 import random
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Tuple, Union
 
 import numpy as np
 import torch

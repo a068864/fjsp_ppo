@@ -50,7 +50,7 @@ def test_best_callback_preserves_existing_score(tmp_path: Path):
     cb = BestModelCallback(tmp_path / "best_model.zip", metric="mean_reward")
     cb.model = _FakeModel([])
     cb.load_persisted_best(tmp_path)
-    assert cb.best_mean_reward == pytest.approx(3.5)
+    assert cb.best_score == pytest.approx(3.5)
     assert cb.update(3.0) is False
     assert cb.update(4.0) is True
     assert load_best_score(tmp_path) == pytest.approx(4.0)

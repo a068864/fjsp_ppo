@@ -77,6 +77,7 @@ def test_cli_rule_validation():
     args = parse_args(["--rule", "spt", "--n-episodes", "1"])
     assert args.rule == "SPT"
     assert "SPT" in RULES
+    assert parse_args(["--rule", "SPT", "--full-scale"]).full_scale is True
 
 
 def test_tie_breaks_lowest_action_index():

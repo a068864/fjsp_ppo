@@ -54,7 +54,7 @@ def test_best_score_persists_metric_name(tmp_path: Path):
     assert record is not None
     assert record["best_metric"] == "mean_makespan"
     assert record["best_score"] == pytest.approx(42.5)
-    assert record["best_mean_makespan"] == pytest.approx(42.5)
+    assert "best_mean_makespan" not in record
     assert load_best_score(tmp_path) == pytest.approx(42.5)
 
 

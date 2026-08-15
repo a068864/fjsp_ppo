@@ -11,15 +11,14 @@ import argparse
 import sys
 from typing import Optional
 
-from config import EvalConfig, get_default_eval_config, get_full_scale_eval_config
+from config import EvalConfig
 from training.eval_cli import (
     add_shared_eval_args,
-    apply_shared_eval_args,
-    build_eval_train_config,
+    eval_config_from_args,
+    make_eval_vec_env,
+    prepare_eval_config,
 )
 from training.evaluate import evaluate_random_fjsp, print_eval_result
-from training.make_env import make_vec_env
-from utils import configure_root_logging, set_global_seed
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -36,20 +35,8 @@ def run_baseline(
     args: Optional[argparse.Namespace] = None,
 ):
     """Run random-action evaluation and print metrics."""
-    configure_root_logging()
-    cfg = cfg or get_default_eval_config()
-    if args is not None:
-        cfg = apply_shared_eval_args(cfg, args)
-
-    set_global_seed(cfg.seed, deterministic=True)
-
-    train_cfg = build_eval_train_config(cfg)
-    eval_env = make_vec_env(
-        train_cfg,
-        n_envs=1,
-        use_subprocess=False,
-        for_eval=True,
-    )
+    cfg = prepare_eval_config(cfg, args)
+    eval_env = make_eval_vec_env(cfg)
 
     try:
         eval_env.seed(cfg.seed)
@@ -67,12 +54,7 @@ def run_baseline(
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI entry point."""
     args = parse_args(argv)
-    cfg = (
-        get_full_scale_eval_config()
-        if getattr(args, "full_scale", False)
-        else get_default_eval_config()
-    )
-    run_baseline(cfg, args)
+    run_baseline(eval_config_from_args(args), args)
     return 0
 
 

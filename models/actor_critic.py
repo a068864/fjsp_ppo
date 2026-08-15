@@ -199,6 +199,17 @@ class GraphActorCritic(nn.Module):
             return logits.masked_fill(invalid, mask_value)
         return logits
 
+    def _assignment_logits(
+        self,
+        data: HeteroData,
+        machine_emb: torch.Tensor,
+        operation_emb: torch.Tensor,
+        device: torch.device,
+    ) -> torch.Tensor:
+        efficiency = self.efficiency_matrix(data, device=device)
+        dispatch = self.dispatch_score_matrix(data, efficiency, device=device)
+        return self.actor(machine_emb, operation_emb, dispatch)
+
     def forward_single(
         self,
         data: HeteroData,
@@ -211,9 +222,7 @@ class GraphActorCritic(nn.Module):
         """
         device = next(self.parameters()).device
         machine_emb, operation_emb, graph_emb = self.encoder(data)
-        efficiency = self.efficiency_matrix(data, device=device)
-        dispatch = self.dispatch_score_matrix(data, efficiency, device=device)
-        logits = self.actor(machine_emb, operation_emb, dispatch)
+        logits = self._assignment_logits(data, machine_emb, operation_emb, device)
         logits = self.apply_action_mask(logits, action_mask)
         value = self.critic(graph_emb).squeeze(-1)
         return logits, value
@@ -246,9 +255,9 @@ class GraphActorCritic(nn.Module):
         logits_list: List[torch.Tensor] = []
         n_actions: Optional[int] = None
         for i, graph in enumerate(graphs):
-            efficiency = self.efficiency_matrix(graph, device=device)
-            dispatch = self.dispatch_score_matrix(graph, efficiency, device=device)
-            logits_i = self.actor(machine_list[i], operation_list[i], dispatch)
+            logits_i = self._assignment_logits(
+                graph, machine_list[i], operation_list[i], device
+            )
             if n_actions is None:
                 n_actions = int(logits_i.numel())
             elif int(logits_i.numel()) != n_actions:
@@ -270,15 +279,6 @@ class GraphActorCritic(nn.Module):
             return masked[0], values.squeeze(0)
         return torch.stack(masked, dim=0), values
 
-    def get_logits(
-        self,
-        data: GraphInput,
-        action_mask: MaskInput = None,
-    ) -> torch.Tensor:
-        """Return masked action logits only."""
-        logits, _ = self.forward(data, action_mask=action_mask)
-        return logits
-
     def get_value(self, data: GraphInput) -> torch.Tensor:
         """Return critic value(s) only (skips the actor / edge predictor)."""
         graphs = self._as_graph_list(data)
@@ -291,4 +291,4 @@ class GraphActorCritic(nn.Module):
         return values
 
 
-__all__ = ["MASK_LOGIT", "GraphActorCritic"]
+__all__ = ["GraphActorCritic"]

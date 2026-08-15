@@ -54,6 +54,15 @@ def _require_negative_finite_float(name: str, value: float) -> None:
         raise ValueError(f"{name} must be a finite negative float, got {value!r}")
 
 
+def _require_non_negative_float(name: str, value: float) -> None:
+    try:
+        value_f = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be >= 0, got {value!r}") from exc
+    if value_f < 0.0:
+        raise ValueError(f"{name} must be >= 0, got {value!r}")
+
+
 def _require_uint32(name: str, value: int) -> None:
     _require_non_negative_int(name, value)
     if int(value) > _UINT32_MAX:
@@ -120,16 +129,7 @@ class EnvConfig:
         _require_probability("shared_dep_prob", self.shared_dep_prob)
         _require_positive_float("time_step", self.time_step)
         _require_negative_finite_float("time_penalty", self.time_penalty)
-        try:
-            std = float(self.compatible_efficiency_std)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"compatible_efficiency_std must be >= 0, got {self.compatible_efficiency_std!r}"
-            ) from exc
-        if std < 0.0:
-            raise ValueError(
-                f"compatible_efficiency_std must be >= 0, got {self.compatible_efficiency_std!r}"
-            )
+        _require_non_negative_float("compatible_efficiency_std", self.compatible_efficiency_std)
 
 
 @dataclass
@@ -216,6 +216,14 @@ class PPOConfig:
             _require_positive_float("target_kl", float(self.target_kl))
 
 
+def _coerce(value: Any, cls: type):
+    return value if isinstance(value, cls) else cls(**value)
+
+
+def _eval_from_train(cfg: TrainConfig) -> EvalConfig:
+    return EvalConfig(env=replace(cfg.env), model=replace(cfg.model))
+
+
 # Held-out eval seeds sit far from training worker seeds (seed + rank*1000).
 EVAL_SEED_OFFSET = 1_000_000
 
@@ -247,12 +255,9 @@ class TrainConfig:
     ppo: PPOConfig = field(default_factory=PPOConfig)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.env, EnvConfig):
-            self.env = EnvConfig(**self.env)  # type: ignore[arg-type]
-        if not isinstance(self.model, ModelConfig):
-            self.model = ModelConfig(**self.model)  # type: ignore[arg-type]
-        if not isinstance(self.ppo, PPOConfig):
-            self.ppo = PPOConfig(**self.ppo)  # type: ignore[arg-type]
+        self.env = _coerce(self.env, EnvConfig)
+        self.model = _coerce(self.model, ModelConfig)
+        self.ppo = _coerce(self.ppo, PPOConfig)
         if self.eval_seed is None:
             self.eval_seed = int(self.seed) + EVAL_SEED_OFFSET
         self.validate()
@@ -312,10 +317,8 @@ class EvalConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.env, EnvConfig):
-            self.env = EnvConfig(**self.env)  # type: ignore[arg-type]
-        if not isinstance(self.model, ModelConfig):
-            self.model = ModelConfig(**self.model)  # type: ignore[arg-type]
+        self.env = _coerce(self.env, EnvConfig)
+        self.model = _coerce(self.model, ModelConfig)
         self.validate()
 
     def validate(self) -> None:
@@ -373,11 +376,6 @@ def get_debug_train_config() -> TrainConfig:
     )
 
 
-def get_default_train_config() -> TrainConfig:
-    """Return the default training configuration (demo-scale 5×3×4)."""
-    return get_debug_train_config()
-
-
 def get_full_scale_train_config() -> TrainConfig:
     """Serious-run config: 25×15×8 instance, default model sizes, n_steps=512."""
     return TrainConfig(
@@ -389,11 +387,9 @@ def get_full_scale_train_config() -> TrainConfig:
 
 def get_default_eval_config() -> EvalConfig:
     """Return the default evaluation configuration (demo-scale 5×3×4)."""
-    cfg = get_default_train_config()
-    return EvalConfig(env=replace(cfg.env), model=replace(cfg.model))
+    return _eval_from_train(get_debug_train_config())
 
 
 def get_full_scale_eval_config() -> EvalConfig:
     """Evaluation config matching ``get_full_scale_train_config()``."""
-    cfg = get_full_scale_train_config()
-    return EvalConfig(env=replace(cfg.env), model=replace(cfg.model))
+    return _eval_from_train(get_full_scale_train_config())

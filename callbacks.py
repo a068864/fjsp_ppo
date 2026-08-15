@@ -141,19 +141,19 @@ class BestModelCallback(BaseCallback):
             raise ValueError(f"Unsupported best metric: {self.metric!r}")
         # Lower-is-better for makespan; higher-is-better for reward.
         self.best_score = np.inf if self.metric == "mean_makespan" else -np.inf
-        # Backward-compatible alias used by older tests.
-        self.best_mean_reward = self.best_score
         self.config = config
 
     def load_persisted_best(self, checkpoint_dir: Union[str, Path]) -> None:
         """Preserve an existing best score across resume."""
-        from training.checkpoints import load_best_score, load_best_score_record
+        from training.checkpoints import load_best_score_record
 
         record = load_best_score_record(checkpoint_dir)
-        score = load_best_score(checkpoint_dir)
-        if score is None:
+        if record is None:
             return
-        if record is not None and str(record.get("best_metric", self.metric)) != self.metric:
+        if "best_score" not in record:
+            return
+        score = float(record["best_score"])
+        if str(record.get("best_metric", self.metric)) != self.metric:
             logger.warning(
                 "Ignoring persisted best score with metric=%s (expected %s)",
                 record.get("best_metric"),
@@ -176,7 +176,6 @@ class BestModelCallback(BaseCallback):
                     )
                     return
         self.best_score = float(score)
-        self.best_mean_reward = self.best_score
 
     def update(self, score: float) -> bool:
         """Save when the configured metric improves. Returns True if improved."""
@@ -191,7 +190,6 @@ class BestModelCallback(BaseCallback):
             return False
 
         self.best_score = value
-        self.best_mean_reward = value
         ensure_dir(self.save_path.parent)
         from training.checkpoints import save_best_score, save_checkpoint
 

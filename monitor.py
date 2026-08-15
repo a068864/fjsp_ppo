@@ -8,12 +8,10 @@ from __future__ import annotations
 
 import csv
 import time
-from collections import deque
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, SupportsFloat, Tuple, Union
+from typing import Any, Dict, List, Optional, SupportsFloat, Tuple, Union
 
 import gymnasium as gym
-import numpy as np
 from gymnasium.core import Env
 
 from utils import get_logger
@@ -44,28 +42,18 @@ class FJSPMonitor(gym.Wrapper):
         env: Env,
         filename: Optional[PathLike] = None,
         allow_early_resets: bool = True,
-        max_history: int = 100,
     ) -> None:
         """
         Args:
             env: Environment to wrap.
             filename: Optional CSV path (without or with ``.csv`` / ``.monitor.csv``).
             allow_early_resets: If False, raise when ``reset`` is called mid-episode.
-            max_history: Number of recent episode stats to keep in memory.
         """
         super().__init__(env)
         self.allow_early_resets = bool(allow_early_resets)
-        self.max_history = int(max_history)
 
         self.rewards: List[float] = []
         self.needs_reset = True
-        self.episode_returns: Deque[float] = deque(maxlen=self.max_history)
-        self.episode_lengths: Deque[int] = deque(maxlen=self.max_history)
-        self.episode_makespans: Deque[float] = deque(maxlen=self.max_history)
-        self.episode_successes: Deque[float] = deque(maxlen=self.max_history)
-        self.episode_times: Deque[float] = deque(maxlen=self.max_history)
-
-        self.total_steps = 0
         self.total_episodes = 0
         self.t_start = time.time()
         self._episode_start_time = self.t_start
@@ -100,7 +88,6 @@ class FJSPMonitor(gym.Wrapper):
         else:
             raw = float(reward)
         self.rewards.append(raw)
-        self.total_steps += 1
 
         done = bool(terminated or truncated)
         if done:
@@ -126,12 +113,6 @@ class FJSPMonitor(gym.Wrapper):
                 "truncated": bool(truncated),
             }
             info["episode"] = episode_info
-
-            self.episode_returns.append(ep_rew)
-            self.episode_lengths.append(ep_len)
-            self.episode_makespans.append(makespan)
-            self.episode_successes.append(1.0 if success else 0.0)
-            self.episode_times.append(ep_time)
             self.total_episodes += 1
             self.needs_reset = True
 
@@ -156,45 +137,6 @@ class FJSPMonitor(gym.Wrapper):
             )
 
         return obs, reward, terminated, truncated, info
-
-    def get_episode_rewards(self) -> List[float]:
-        """Return recent episode returns."""
-        return list(self.episode_returns)
-
-    def get_episode_lengths(self) -> List[int]:
-        """Return recent episode lengths."""
-        return list(self.episode_lengths)
-
-    def get_episode_makespans(self) -> List[float]:
-        """Return recent episode makespans."""
-        return list(self.episode_makespans)
-
-    def get_episode_success_rate(self) -> float:
-        """Return mean success rate over the history window."""
-        if not self.episode_successes:
-            return 0.0
-        return float(np.mean(self.episode_successes))
-
-    def get_recent_stats(self) -> Dict[str, float]:
-        """Aggregate recent episode statistics for logging/callbacks."""
-        if not self.episode_returns:
-            return {
-                "mean_reward": 0.0,
-                "mean_length": 0.0,
-                "mean_makespan": float("inf"),
-                "success_rate": 0.0,
-                "n_episodes": 0.0,
-            }
-        finite_makespans = [m for m in self.episode_makespans if np.isfinite(m)]
-        return {
-            "mean_reward": float(np.mean(self.episode_returns)),
-            "mean_length": float(np.mean(self.episode_lengths)),
-            "mean_makespan": float(np.mean(finite_makespans))
-            if finite_makespans
-            else float("inf"),
-            "success_rate": float(np.mean(self.episode_successes)),
-            "n_episodes": float(len(self.episode_returns)),
-        }
 
     def close(self) -> None:
         if self.results_writer is not None:
@@ -235,28 +177,6 @@ class _MonitorCSVWriter:
             self._file.close()
 
 
-def is_fjsp_monitor(env: Env) -> bool:
-    """Return True if ``env`` or any wrapper in the chain is an ``FJSPMonitor``."""
-    current: Any = env
-    while current is not None:
-        if isinstance(current, FJSPMonitor):
-            return True
-        current = getattr(current, "env", None)
-    return False
-
-
-def get_fjsp_monitor(env: Env) -> Optional[FJSPMonitor]:
-    """Find and return the ``FJSPMonitor`` wrapper in the chain, if any."""
-    current: Any = env
-    while current is not None:
-        if isinstance(current, FJSPMonitor):
-            return current
-        current = getattr(current, "env", None)
-    return None
-
-
 __all__ = [
     "FJSPMonitor",
-    "get_fjsp_monitor",
-    "is_fjsp_monitor",
 ]

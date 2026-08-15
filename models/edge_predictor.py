@@ -49,29 +49,20 @@ class EdgePredictor(nn.Module):
         self.scale = math.sqrt(2.0 * hidden_dim)
         if predictor_type == "bilinear":
             self.interaction_weight = nn.Parameter(torch.empty(hidden_dim, hidden_dim))
-            self.predictor = self._bilinear_predictor
-        else:
-            self.predictor = self._dot_product_predictor
-
         self.reset_parameters()
 
-    def _dot_product_predictor(
+    def _pair_scores(
         self,
         machine_emb: torch.Tensor,
         operation_emb: torch.Tensor,
     ) -> torch.Tensor:
         m = self.norm_m(machine_emb)
         o = self.norm_o(operation_emb)
-        return torch.matmul(m, o.t()).div(self.scale).view(-1)
-
-    def _bilinear_predictor(
-        self,
-        machine_emb: torch.Tensor,
-        operation_emb: torch.Tensor,
-    ) -> torch.Tensor:
-        m = self.norm_m(machine_emb)
-        o = self.norm_o(operation_emb)
-        return torch.matmul(torch.matmul(m, self.interaction_weight), o.t()).div(self.scale).view(-1)
+        if self.predictor_type == "bilinear":
+            scores = torch.matmul(torch.matmul(m, self.interaction_weight), o.t())
+        else:
+            scores = torch.matmul(m, o.t())
+        return scores.div(self.scale).view(-1)
 
     def _score_pair(
         self,
@@ -79,7 +70,7 @@ class EdgePredictor(nn.Module):
         operation_emb: torch.Tensor,
         efficiency: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        logits = self.predictor(machine_emb, operation_emb)
+        logits = self._pair_scores(machine_emb, operation_emb)
         if efficiency is None:
             return logits
         # efficiency: (n_ops, n_machines) -> machine-major flat

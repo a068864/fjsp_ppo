@@ -134,7 +134,7 @@ All hyperparameters live in `config.py` (`TrainConfig`, `EnvConfig`, `ModelConfi
 
 Each `step()` assigns one operation, then advances simulated time by a fixed `time_step`. Only actual processed work is subtracted from remaining durations / machine workload; unused fractional tick capacity is **not** transferred to the next queued operation in the same tick. Terminal `rollout()` uses the same tick routine.
 
-### Default / demo config (`get_default_train_config()` / `get_debug_train_config()`)
+### Default / demo config (`get_debug_train_config()`)
 
 | Hyperparameter      | Value      |
 |---------------------|------------|

@@ -14,7 +14,7 @@ from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 from torch_geometric.data import HeteroData
 
 from config import ModelConfig
-from models.actor_critic import MASK_LOGIT, GraphActorCritic
+from models.actor_critic import GraphActorCritic
 from training.graph_buffer import GRAPH_KEY, graph_obs_as_tensor
 from utils import get_logger
 
@@ -258,7 +258,5 @@ def make_policy_kwargs(model_config: Optional[ModelConfig] = None) -> Dict[str, 
 
 __all__ = [
     "GraphActorCriticPolicy",
-    "GraphPassthroughExtractor",
-    "MASK_LOGIT",
     "make_policy_kwargs",
 ]

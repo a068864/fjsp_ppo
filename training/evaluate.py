@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import time
-from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 from stable_baselines3.common.base_class import BaseAlgorithm
@@ -34,10 +34,6 @@ class EvalResult:
     n_failure: int = 0
     n_timeout: int = 0
 
-    def to_dict(self) -> Dict[str, float]:
-        """Convert metrics to a plain dictionary."""
-        return {key: float(value) for key, value in asdict(self).items()}
-
     def format_summary(self) -> str:
         """Human-readable multi-line summary."""
         return "\n".join(
@@ -59,36 +55,113 @@ def _episode_from_info(
     fallback_length: int,
 ) -> Dict[str, Any]:
     """Build episode stats from info, with numeric fallbacks."""
+
+    def _filled(
+        ep: Dict[str, Any],
+        *,
+        makespan: float,
+        success: bool,
+    ) -> Dict[str, Any]:
+        out = dict(ep)
+        out.setdefault("r", fallback_reward)
+        out.setdefault("l", fallback_length)
+        out.setdefault("makespan", makespan)
+        out.setdefault("success", success)
+        return out
+
     if "episode" in info and isinstance(info["episode"], dict):
-        ep = dict(info["episode"])
-        ep.setdefault("r", fallback_reward)
-        ep.setdefault("l", fallback_length)
-        ep.setdefault("makespan", float("inf"))
-        ep.setdefault("success", False)
-        return ep
+        return _filled(info["episode"], makespan=float("inf"), success=False)
 
     final_info = info.get("final_info")
     if isinstance(final_info, dict):
+        makespan = float(final_info.get("makespan", float("inf")))
+        success = bool(final_info.get("success", False))
         if "episode" in final_info and isinstance(final_info["episode"], dict):
-            ep = dict(final_info["episode"])
-            ep.setdefault("r", fallback_reward)
-            ep.setdefault("l", fallback_length)
-            ep.setdefault("makespan", float(final_info.get("makespan", float("inf"))))
-            ep.setdefault("success", bool(final_info.get("success", False)))
-            return ep
-        return {
-            "r": fallback_reward,
-            "l": fallback_length,
-            "makespan": float(final_info.get("makespan", float("inf"))),
-            "success": bool(final_info.get("success", False)),
-        }
+            return _filled(final_info["episode"], makespan=makespan, success=success)
+        return _filled({}, makespan=makespan, success=success)
 
-    return {
-        "r": fallback_reward,
-        "l": fallback_length,
-        "makespan": float(info.get("makespan", float("inf"))),
-        "success": bool(info.get("success", False)),
-    }
+    return _filled(
+        {},
+        makespan=float(info.get("makespan", float("inf"))),
+        success=bool(info.get("success", False)),
+    )
+
+
+def _require_dummy_vec(env: VecEnv, purpose: str) -> None:
+    if not hasattr(env, "envs"):
+        raise ValueError(
+            f"{purpose} requires GraphDummyVecEnv (env.envs); "
+            "use make_vec_env(..., use_subprocess=False)"
+        )
+
+
+def _rollout_eval(
+    env: VecEnv,
+    n_episodes: int,
+    choose_actions: Callable[[Any], Any],
+) -> EvalResult:
+    """Collect ``n_episodes`` VecEnv rollouts using ``choose_actions(obs)``."""
+    if n_episodes <= 0:
+        raise ValueError(f"n_episodes must be positive, got {n_episodes}")
+
+    episode_rewards: List[float] = []
+    episode_lengths: List[float] = []
+    episode_makespans: List[float] = []
+    episode_successes: List[float] = []
+    episode_timeouts: List[float] = []
+    inference_times: List[float] = []
+
+    n_envs = env.num_envs
+    running_rewards = np.zeros(n_envs, dtype=np.float64)
+    running_lengths = np.zeros(n_envs, dtype=np.int64)
+
+    observations = env.reset()
+
+    while len(episode_rewards) < n_episodes:
+        start = time.perf_counter()
+        actions = choose_actions(observations)
+        inference_times.append(time.perf_counter() - start)
+
+        observations, rewards, dones, infos = env.step(actions)
+        running_rewards += np.asarray(rewards, dtype=np.float64)
+        running_lengths += 1
+
+        for env_idx, done in enumerate(np.asarray(dones, dtype=bool)):
+            if not done:
+                continue
+
+            info = infos[env_idx] if env_idx < len(infos) else {}
+            if not isinstance(info, dict):
+                info = {}
+
+            ep = _episode_from_info(
+                info,
+                fallback_reward=float(running_rewards[env_idx]),
+                fallback_length=int(running_lengths[env_idx]),
+            )
+
+            episode_rewards.append(float(ep.get("r", running_rewards[env_idx])))
+            episode_lengths.append(float(ep.get("l", running_lengths[env_idx])))
+            episode_makespans.append(float(ep.get("makespan", float("inf"))))
+            success = bool(ep.get("success", False))
+            episode_successes.append(1.0 if success else 0.0)
+            timed_out = bool(ep.get("truncated", info.get("TimeLimit.truncated", False)))
+            episode_timeouts.append(1.0 if timed_out and not success else 0.0)
+
+            running_rewards[env_idx] = 0.0
+            running_lengths[env_idx] = 0
+
+            if len(episode_rewards) >= n_episodes:
+                break
+
+    return _aggregate_eval(
+        episode_rewards[:n_episodes],
+        episode_lengths[:n_episodes],
+        episode_makespans[:n_episodes],
+        episode_successes[:n_episodes],
+        episode_timeouts[:n_episodes],
+        inference_times,
+    )
 
 
 def evaluate_policy_fjsp(
@@ -108,23 +181,8 @@ def evaluate_policy_fjsp(
     Returns:
         ``EvalResult`` with reward, makespan, length, success, and inference time.
     """
-    if n_episodes <= 0:
-        raise ValueError(f"n_episodes must be positive, got {n_episodes}")
 
-    episode_rewards: List[float] = []
-    episode_lengths: List[float] = []
-    episode_makespans: List[float] = []
-    episode_successes: List[float] = []
-    episode_timeouts: List[float] = []
-    inference_times: List[float] = []
-
-    n_envs = env.num_envs
-    running_rewards = np.zeros(n_envs, dtype=np.float64)
-    running_lengths = np.zeros(n_envs, dtype=np.int64)
-
-    observations = env.reset()
-
-    while len(episode_rewards) < n_episodes:
+    def choose_actions(observations: Any) -> Any:
         mask = observations.get("action_mask") if isinstance(observations, dict) else None
         if mask is not None:
             mask_arr = np.asarray(mask)
@@ -132,58 +190,10 @@ def evaluate_policy_fjsp(
                 mask_arr = mask_arr.reshape(1, -1)
             if np.any(np.sum(mask_arr > 0.5, axis=-1) == 0):
                 raise ValueError("empty action mask during evaluation")
-
-        start = time.perf_counter()
         actions, _states = model.predict(observations, deterministic=deterministic)
-        inference_times.append(time.perf_counter() - start)
+        return actions
 
-        observations, rewards, dones, infos = env.step(actions)
-        running_rewards += np.asarray(rewards, dtype=np.float64)
-        running_lengths += 1
-
-        for env_idx, done in enumerate(np.asarray(dones, dtype=bool)):
-            if not done:
-                continue
-
-            info = infos[env_idx] if env_idx < len(infos) else {}
-            if not isinstance(info, dict):
-                info = {}
-
-            ep = _episode_from_info(
-                info,
-                fallback_reward=float(running_rewards[env_idx]),
-                fallback_length=int(running_lengths[env_idx]),
-            )
-
-            episode_rewards.append(float(ep.get("r", running_rewards[env_idx])))
-            episode_lengths.append(float(ep.get("l", running_lengths[env_idx])))
-            episode_makespans.append(float(ep.get("makespan", float("inf"))))
-            success = bool(ep.get("success", False))
-            episode_successes.append(1.0 if success else 0.0)
-            timed_out = bool(ep.get("truncated", info.get("TimeLimit.truncated", False)))
-            episode_timeouts.append(1.0 if timed_out and not success else 0.0)
-
-            running_rewards[env_idx] = 0.0
-            running_lengths[env_idx] = 0
-
-            if len(episode_rewards) >= n_episodes:
-                break
-
-    episode_rewards = episode_rewards[:n_episodes]
-    episode_lengths = episode_lengths[:n_episodes]
-    episode_makespans = episode_makespans[:n_episodes]
-    episode_successes = episode_successes[:n_episodes]
-    episode_timeouts = episode_timeouts[:n_episodes]
-
-    result = _aggregate_eval(
-        episode_rewards,
-        episode_lengths,
-        episode_makespans,
-        episode_successes,
-        episode_timeouts,
-        inference_times,
-    )
-    return result
+    return _rollout_eval(env, n_episodes, choose_actions)
 
 
 def evaluate_random_fjsp(
@@ -203,79 +213,18 @@ def evaluate_random_fjsp(
     """
     if n_episodes <= 0:
         raise ValueError(f"n_episodes must be positive, got {n_episodes}")
-
     rng = np.random.default_rng(seed)
-
-    episode_rewards: List[float] = []
-    episode_lengths: List[float] = []
-    episode_makespans: List[float] = []
-    episode_successes: List[float] = []
-    episode_timeouts: List[float] = []
-    inference_times: List[float] = []
-
-    n_envs = env.num_envs
-    running_rewards = np.zeros(n_envs, dtype=np.float64)
-    running_lengths = np.zeros(n_envs, dtype=np.int64)
-
-    observations = env.reset()
     logger.info(
         "Starting random evaluation: n_episodes=%d seed=%d n_envs=%d",
         n_episodes,
         seed,
-        n_envs,
+        env.num_envs,
     )
 
-    while len(episode_rewards) < n_episodes:
-        start = time.perf_counter()
-        actions = sample_masked_random_actions(observations["action_mask"], rng)
-        inference_times.append(time.perf_counter() - start)
+    def choose_actions(observations: Any) -> np.ndarray:
+        return sample_masked_random_actions(observations["action_mask"], rng)
 
-        observations, rewards, dones, infos = env.step(actions)
-        running_rewards += np.asarray(rewards, dtype=np.float64)
-        running_lengths += 1
-
-        for env_idx, done in enumerate(np.asarray(dones, dtype=bool)):
-            if not done:
-                continue
-
-            info = infos[env_idx] if env_idx < len(infos) else {}
-            if not isinstance(info, dict):
-                info = {}
-
-            ep = _episode_from_info(
-                info,
-                fallback_reward=float(running_rewards[env_idx]),
-                fallback_length=int(running_lengths[env_idx]),
-            )
-
-            episode_rewards.append(float(ep.get("r", running_rewards[env_idx])))
-            episode_lengths.append(float(ep.get("l", running_lengths[env_idx])))
-            episode_makespans.append(float(ep.get("makespan", float("inf"))))
-            success = bool(ep.get("success", False))
-            episode_successes.append(1.0 if success else 0.0)
-            timed_out = bool(ep.get("truncated", info.get("TimeLimit.truncated", False)))
-            episode_timeouts.append(1.0 if timed_out and not success else 0.0)
-
-            running_rewards[env_idx] = 0.0
-            running_lengths[env_idx] = 0
-
-            if len(episode_rewards) >= n_episodes:
-                break
-
-    episode_rewards = episode_rewards[:n_episodes]
-    episode_lengths = episode_lengths[:n_episodes]
-    episode_makespans = episode_makespans[:n_episodes]
-    episode_successes = episode_successes[:n_episodes]
-    episode_timeouts = episode_timeouts[:n_episodes]
-
-    result = _aggregate_eval(
-        episode_rewards,
-        episode_lengths,
-        episode_makespans,
-        episode_successes,
-        episode_timeouts,
-        inference_times,
-    )
+    result = _rollout_eval(env, n_episodes, choose_actions)
     logger.info("Random evaluation finished:\n%s", result.format_summary())
     return result
 
@@ -300,85 +249,22 @@ def evaluate_heuristic_fjsp(
     """
     if n_episodes <= 0:
         raise ValueError(f"n_episodes must be positive, got {n_episodes}")
-    if not hasattr(env, "envs"):
-        raise ValueError(
-            "heuristic evaluation requires GraphDummyVecEnv (env.envs); "
-            "use make_vec_env(..., use_subprocess=False)"
-        )
-
-    episode_rewards: List[float] = []
-    episode_lengths: List[float] = []
-    episode_makespans: List[float] = []
-    episode_successes: List[float] = []
-    episode_timeouts: List[float] = []
-    inference_times: List[float] = []
-
-    n_envs = env.num_envs
-    running_rewards = np.zeros(n_envs, dtype=np.float64)
-    running_lengths = np.zeros(n_envs, dtype=np.int64)
-
-    observations = env.reset()
+    _require_dummy_vec(env, "heuristic evaluation")
     logger.info(
         "Starting heuristic evaluation: rule=%s n_episodes=%d n_envs=%d",
         rule,
         n_episodes,
-        n_envs,
+        env.num_envs,
     )
 
-    while len(episode_rewards) < n_episodes:
-        start = time.perf_counter()
-        actions = np.zeros(n_envs, dtype=np.int64)
-        for env_idx in range(n_envs):
+    def choose_actions(_observations: Any) -> np.ndarray:
+        actions = np.zeros(env.num_envs, dtype=np.int64)
+        for env_idx in range(env.num_envs):
             fjsp = env.envs[env_idx].unwrapped
             actions[env_idx] = select_heuristic_action(fjsp, rule)
-        inference_times.append(time.perf_counter() - start)
+        return actions
 
-        observations, rewards, dones, infos = env.step(actions)
-        running_rewards += np.asarray(rewards, dtype=np.float64)
-        running_lengths += 1
-
-        for env_idx, done in enumerate(np.asarray(dones, dtype=bool)):
-            if not done:
-                continue
-
-            info = infos[env_idx] if env_idx < len(infos) else {}
-            if not isinstance(info, dict):
-                info = {}
-
-            ep = _episode_from_info(
-                info,
-                fallback_reward=float(running_rewards[env_idx]),
-                fallback_length=int(running_lengths[env_idx]),
-            )
-
-            episode_rewards.append(float(ep.get("r", running_rewards[env_idx])))
-            episode_lengths.append(float(ep.get("l", running_lengths[env_idx])))
-            episode_makespans.append(float(ep.get("makespan", float("inf"))))
-            success = bool(ep.get("success", False))
-            episode_successes.append(1.0 if success else 0.0)
-            timed_out = bool(ep.get("truncated", info.get("TimeLimit.truncated", False)))
-            episode_timeouts.append(1.0 if timed_out and not success else 0.0)
-
-            running_rewards[env_idx] = 0.0
-            running_lengths[env_idx] = 0
-
-            if len(episode_rewards) >= n_episodes:
-                break
-
-    episode_rewards = episode_rewards[:n_episodes]
-    episode_lengths = episode_lengths[:n_episodes]
-    episode_makespans = episode_makespans[:n_episodes]
-    episode_successes = episode_successes[:n_episodes]
-    episode_timeouts = episode_timeouts[:n_episodes]
-
-    result = _aggregate_eval(
-        episode_rewards,
-        episode_lengths,
-        episode_makespans,
-        episode_successes,
-        episode_timeouts,
-        inference_times,
-    )
+    result = _rollout_eval(env, n_episodes, choose_actions)
     logger.info("Heuristic evaluation finished (%s):\n%s", rule, result.format_summary())
     return result
 
@@ -404,11 +290,7 @@ def evaluate_milp_fjsp(
     """
     if n_episodes <= 0:
         raise ValueError(f"n_episodes must be positive, got {n_episodes}")
-    if not hasattr(env, "envs"):
-        raise ValueError(
-            "MILP evaluation requires GraphDummyVecEnv (env.envs); "
-            "use make_vec_env(..., use_subprocess=False)"
-        )
+    _require_dummy_vec(env, "MILP evaluation")
     if env.num_envs != 1:
         raise ValueError(f"MILP evaluation requires n_envs=1, got {env.num_envs}")
 

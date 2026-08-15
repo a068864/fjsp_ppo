@@ -12,20 +12,18 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from config import EvalConfig, get_default_eval_config, get_full_scale_eval_config
-from models.graph_ppo import GraphPPO
-from models.sb3_policy import GraphActorCriticPolicy
+from config import EvalConfig
+from models.graph_ppo import load_graph_ppo
 from training.eval_cli import (
     add_shared_eval_args,
     apply_shared_eval_args,
-    build_eval_train_config,
+    eval_config_from_args,
+    make_eval_vec_env,
+    prepare_eval_config,
 )
 from training.evaluate import evaluate_policy_fjsp, print_eval_result
-from training.graph_buffer import GraphDictRolloutBuffer
-from training.make_env import make_vec_env
 from utils import (
     checkpoint_exists,
-    configure_root_logging,
     get_device,
     get_logger,
     set_global_seed,
@@ -75,6 +73,7 @@ def apply_args(cfg: EvalConfig, args: argparse.Namespace) -> EvalConfig:
         cfg.device = str(args.device)
     if args.stochastic:
         cfg.deterministic = False
+    cfg.validate()
     return cfg
 
 
@@ -114,15 +113,8 @@ def resolve_model_path(cfg: EvalConfig, *, explicit: bool = False) -> Path:
 
 def evaluate(cfg: Optional[EvalConfig] = None, args: Optional[argparse.Namespace] = None):
     """Load a checkpoint, run deterministic evaluation, and print metrics."""
-    configure_root_logging()
-    cfg = cfg or get_default_eval_config()
-    explicit_path = False
-    if args is not None:
-        explicit_path = args.model_path is not None
-        cfg = apply_args(cfg, args)
-        cfg.validate()
-
-    set_global_seed(cfg.seed, deterministic=True)
+    explicit_path = bool(args is not None and args.model_path is not None)
+    cfg = prepare_eval_config(cfg, args, apply_fn=apply_args)
     model_path = resolve_model_path(cfg, explicit=explicit_path)
     device = get_device(cfg.device)
 
@@ -133,25 +125,11 @@ def evaluate(cfg: Optional[EvalConfig] = None, args: Optional[argparse.Namespace
             "SB3/cloudpickle ZIPs are executable input; only trust files you created."
         )
 
-    train_cfg = build_eval_train_config(cfg)
-    eval_env = make_vec_env(
-        train_cfg,
-        n_envs=1,
-        use_subprocess=False,
-        for_eval=True,
-    )
+    eval_env = make_eval_vec_env(cfg)
 
     try:
         logger.info("Loading model from %s (device=%s)", model_path, device)
-        model = GraphPPO.load(
-            str(model_path),
-            env=eval_env,
-            device=device,
-            custom_objects={
-                "policy_class": GraphActorCriticPolicy,
-                "rollout_buffer_class": GraphDictRolloutBuffer,
-            },
-        )
+        model = load_graph_ppo(model_path, eval_env, device)
         # Re-apply CLI/eval seed after load so evaluation is comparable across runs.
         set_global_seed(cfg.seed, deterministic=True)
         eval_env.seed(cfg.seed)
@@ -171,12 +149,7 @@ def evaluate(cfg: Optional[EvalConfig] = None, args: Optional[argparse.Namespace
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI entry point."""
     args = parse_args(argv)
-    cfg = (
-        get_full_scale_eval_config()
-        if getattr(args, "full_scale", False)
-        else get_default_eval_config()
-    )
-    evaluate(cfg, args)
+    evaluate(eval_config_from_args(args), args)
     return 0
 
 

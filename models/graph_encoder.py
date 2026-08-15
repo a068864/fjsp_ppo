@@ -10,8 +10,6 @@ import torch.nn.functional as F
 from torch_geometric.data import Batch, HeteroData
 from torch_geometric.nn import AttentionalAggregation, HeteroConv, TransformerConv
 
-from utils import get_logger
-
 from envs.fjsp_env import (
     MACH_IDLE_DURATION,
     MACH_WORKLOAD,
@@ -20,8 +18,6 @@ from envs.fjsp_env import (
     OP_JOB_REMAINING_WORK,
     OP_REMAINING,
 )
-
-logger = get_logger(__name__)
 
 _OP_TIME_COLS = (
     OP_DURATION,
@@ -389,6 +385,19 @@ class GraphEncoder(nn.Module):
                     view[edge_type].edge_attr = edge_attr
         return view
 
+    def _encode_serial(
+        self, graphs: List[HeteroData]
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor], torch.Tensor]:
+        machine_list: List[torch.Tensor] = []
+        operation_list: List[torch.Tensor] = []
+        graph_list: List[torch.Tensor] = []
+        for graph in graphs:
+            machine_emb, operation_emb, graph_emb = self.forward(graph)
+            machine_list.append(machine_emb)
+            operation_list.append(operation_emb)
+            graph_list.append(graph_emb)
+        return machine_list, operation_list, torch.stack(graph_list, dim=0)
+
     def forward(
         self, data: HeteroData
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -439,24 +448,11 @@ class GraphEncoder(nn.Module):
         if not graphs:
             raise ValueError("encode_batch received an empty graph list")
 
-        if len(graphs) == 1:
-            machine_emb, operation_emb, graph_emb = self.forward(graphs[0])
-            return [machine_emb], [operation_emb], graph_emb.unsqueeze(0)
-
         n_ops = [int(g["operation"].x.size(0)) for g in graphs]
         n_mach = [int(g["machine"].x.size(0)) for g in graphs]
-        same_size = len(set(n_ops)) == 1 and len(set(n_mach)) == 1
-
+        same_size = len(graphs) > 1 and len(set(n_ops)) == 1 and len(set(n_mach)) == 1
         if not same_size:
-            machine_list: List[torch.Tensor] = []
-            operation_list: List[torch.Tensor] = []
-            graph_list: List[torch.Tensor] = []
-            for graph in graphs:
-                machine_emb, operation_emb, graph_emb = self.forward(graph)
-                machine_list.append(machine_emb)
-                operation_list.append(operation_emb)
-                graph_list.append(graph_emb)
-            return machine_list, operation_list, torch.stack(graph_list, dim=0)
+            return self._encode_serial(graphs)
 
         device = next(self.parameters()).device
         batch_graphs = [self._batchable_view(g) for g in graphs]
@@ -472,15 +468,7 @@ class GraphEncoder(nn.Module):
                 for token in ("edge_attr", "keyerror", "size", "match", "batch", "collat")
             ) and not isinstance(exc, (KeyError, TypeError)):
                 raise
-            machine_list = []
-            operation_list = []
-            graph_list = []
-            for graph in graphs:
-                machine_emb, operation_emb, graph_emb = self.forward(graph)
-                machine_list.append(machine_emb)
-                operation_list.append(operation_emb)
-                graph_list.append(graph_emb)
-            return machine_list, operation_list, torch.stack(graph_list, dim=0)
+            return self._encode_serial(graphs)
 
         x_dict = self._project_nodes(batch)
         edge_index_dict, edge_attr_dict = self._message_edges(batch)

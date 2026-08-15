@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Optional
 
 from callbacks import build_callbacks, make_lr_schedule
-from config import TrainConfig, get_debug_train_config, get_default_train_config, get_full_scale_train_config
-from models.graph_ppo import GraphPPO
+from config import TrainConfig, get_debug_train_config, get_full_scale_train_config
+from models.graph_ppo import GraphPPO, load_graph_ppo
 from models.sb3_policy import GraphActorCriticPolicy, make_policy_kwargs
 from training.graph_buffer import GraphDictRolloutBuffer
 from training.make_env import make_vec_env
@@ -176,19 +176,7 @@ def maybe_resume(cfg: TrainConfig, train_env) -> GraphPPO:
 
     logger.info("Resuming training from %s", latest)
     device = get_device(cfg.device)
-    try:
-        model = GraphPPO.load(
-            str(latest),
-            env=train_env,
-            device=device,
-            custom_objects={
-                "policy_class": GraphActorCriticPolicy,
-                "rollout_buffer_class": GraphDictRolloutBuffer,
-            },
-        )
-    except Exception:
-        # Preserve the original load error; do not wrap away the root cause.
-        raise
+    model = load_graph_ppo(latest, train_env, device)
     # Restore schedule with progress consistent with already-consumed timesteps.
     model.learning_rate = make_lr_schedule(cfg)
     model._setup_lr_schedule()
@@ -198,7 +186,7 @@ def maybe_resume(cfg: TrainConfig, train_env) -> GraphPPO:
 def train(cfg: Optional[TrainConfig] = None, args: Optional[argparse.Namespace] = None) -> GraphPPO:
     """Run the full training loop and return the trained model."""
     configure_root_logging()
-    cfg = cfg or get_default_train_config()
+    cfg = cfg or get_debug_train_config()
     if args is not None:
         cfg = apply_args(cfg, args)
 
@@ -266,7 +254,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     elif args.full_scale:
         cfg = get_full_scale_train_config()
     else:
-        cfg = get_default_train_config()
+        cfg = get_debug_train_config()
     train(cfg, args)
     return 0
 

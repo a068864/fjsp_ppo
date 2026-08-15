@@ -11,7 +11,7 @@ import argparse
 import sys
 from typing import Optional
 
-from config import get_default_train_config, get_full_scale_train_config
+from config import get_debug_train_config, get_full_scale_train_config
 from train import apply_args, parse_args
 from training.benchmark import measure_training_baseline
 from utils import configure_root_logging
@@ -36,7 +36,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     cfg = (
         get_full_scale_train_config()
         if getattr(args, "full_scale", False)
-        else get_default_train_config()
+        else get_debug_train_config()
     )
     cfg = apply_args(cfg, args)
     metrics = measure_training_baseline(cfg, n_env_steps=int(args.n_env_steps))

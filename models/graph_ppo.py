@@ -36,4 +36,19 @@ class GraphPPO(PPO):
             on_policy_algorithm.obs_as_tensor = original
 
 
-__all__ = ["GraphPPO"]
+def load_graph_ppo(path: Any, env: Any, device: Any) -> GraphPPO:
+    """Load a GraphPPO zip with graph policy and rollout buffer classes restored."""
+    from models.sb3_policy import GraphActorCriticPolicy
+
+    return GraphPPO.load(
+        str(path),
+        env=env,
+        device=device,
+        custom_objects={
+            "policy_class": GraphActorCriticPolicy,
+            "rollout_buffer_class": GraphDictRolloutBuffer,
+        },
+    )
+
+
+__all__ = ["GraphPPO", "load_graph_ppo"]

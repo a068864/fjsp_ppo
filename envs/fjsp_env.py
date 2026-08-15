@@ -57,6 +57,12 @@ class HeteroGraphSpace(spaces.Space):
         return isinstance(x, HeteroData)
 
 
+def _numeric_obs_spaces(n_actions: int) -> Tuple[spaces.Box, spaces.Box]:
+    dummy = spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32)
+    mask = spaces.Box(low=0.0, high=1.0, shape=(int(n_actions),), dtype=np.float32)
+    return dummy, mask
+
+
 class GraphObsSpace(spaces.Space):
     """Gymnasium space for opaque graph observations.
 
@@ -68,12 +74,7 @@ class GraphObsSpace(spaces.Space):
     def __init__(self, n_actions: int) -> None:
         super().__init__(shape=None, dtype=None)
         self.n_actions = int(n_actions)
-        self.dummy_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
-        )
-        self.mask_space = spaces.Box(
-            low=0.0, high=1.0, shape=(self.n_actions,), dtype=np.float32
-        )
+        self.dummy_space, self.mask_space = _numeric_obs_spaces(self.n_actions)
         self.graph_space = HeteroGraphSpace()
 
     def sample(self, mask: Any = None) -> Dict[str, Any]:
@@ -106,14 +107,11 @@ def make_sb3_graph_observation_space(n_actions: int) -> spaces.Dict:
     ``HeteroGraphSpace`` for truthful ``contains`` checks.
     """
     n_actions = int(n_actions)
+    dummy, mask = _numeric_obs_spaces(n_actions)
     return spaces.Dict(
         {
-            "dummy": spaces.Box(
-                low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
-            ),
-            "action_mask": spaces.Box(
-                low=0.0, high=1.0, shape=(n_actions,), dtype=np.float32
-            ),
+            "dummy": dummy,
+            "action_mask": mask,
             # Opaque carrier: shape (0,) — not a flattened graph embedding.
             "graph": spaces.Box(
                 low=-np.inf, high=np.inf, shape=(0,), dtype=np.float32
@@ -204,12 +202,7 @@ class FJSPEnv(gym.Env):
         self.time_step = time_step
         self.min_eligible_machines = min_eligible_machines
 
-        # Create environment-specific random number generators.
-        # Always seed Torch from NumPy so seed=None does not share Torch's fixed default.
-        self._seed = seed
-        self.np_rng = np.random.RandomState(seed)
-        self.torch_gen = torch.Generator(device=self.device)
-        self.torch_gen.manual_seed(int(self.np_rng.randint(0, 2**31 - 1)))
+        self._reseed(seed)
 
         # Environment state tracking
         self.state = None
@@ -282,6 +275,13 @@ class FJSPEnv(gym.Env):
         assert sum(len(j) for j in job_sequences) == self.n_operations
         return job_sequences
 
+    def _reseed(self, seed: Optional[int]) -> None:
+        """Seed NumPy and Torch RNGs. Torch is always derived from NumPy."""
+        self._seed = seed
+        self.np_rng = np.random.RandomState(seed)
+        self.torch_gen = torch.Generator(device=self.device)
+        self.torch_gen.manual_seed(int(self.np_rng.randint(0, 2**31 - 1)))
+
     def _generate_efficiency_modifiers(self) -> torch.Tensor:
         """
         Generate machine efficiency modifiers for operation-machine pairs.
@@ -333,54 +333,29 @@ class FJSPEnv(gym.Env):
             indeg[to_op] += 1
         return adj, indeg
 
-    def _has_cycle(self, deps: List[Tuple[int, int]], all_ops: Set[int]) -> bool:
-        """Return True if ``deps`` contains a cycle (Kahn / BFS)."""
+    def _kahn_order(self, deps: List[Tuple[int, int]], all_ops: Set[int]) -> List[int]:
+        """Kahn / BFS topological order (partial if ``deps`` contains a cycle)."""
         adj, indeg = self._build_adj(deps, all_ops)
         queue: deque[int] = deque(op for op, degree in indeg.items() if degree == 0)
-        seen = 0
+        order: List[int] = []
         while queue:
             current = queue.popleft()
-            seen += 1
-            for neighbor in adj[current]:
-                indeg[neighbor] -= 1
-                if indeg[neighbor] == 0:
-                    queue.append(neighbor)
-        return seen != len(all_ops)
-
-    def _get_topological_order(
-        self, deps: List[Tuple[int, int]], all_ops: Set[int]
-    ) -> Dict[int, int]:
-        """Return operation ID -> topo rank using Kahn / BFS."""
-        adj, indeg = self._build_adj(deps, all_ops)
-        queue: deque[int] = deque(op for op, degree in indeg.items() if degree == 0)
-        order: Dict[int, int] = {}
-        rank = 0
-        while queue:
-            current = queue.popleft()
-            order[current] = rank
-            rank += 1
+            order.append(current)
             for neighbor in adj[current]:
                 indeg[neighbor] -= 1
                 if indeg[neighbor] == 0:
                     queue.append(neighbor)
         return order
 
-    @staticmethod
-    def _can_reach(adj: Dict[int, List[int]], src: int, dst: int) -> bool:
-        """BFS reachability: True if ``dst`` is reachable from ``src``."""
-        if src == dst:
-            return True
-        seen = {src}
-        queue: deque[int] = deque([src])
-        while queue:
-            node = queue.popleft()
-            for nxt in adj[node]:
-                if nxt == dst:
-                    return True
-                if nxt not in seen:
-                    seen.add(nxt)
-                    queue.append(nxt)
-        return False
+    def _has_cycle(self, deps: List[Tuple[int, int]], all_ops: Set[int]) -> bool:
+        """Return True if ``deps`` contains a cycle (Kahn / BFS)."""
+        return len(self._kahn_order(deps, all_ops)) != len(all_ops)
+
+    def _get_topological_order(
+        self, deps: List[Tuple[int, int]], all_ops: Set[int]
+    ) -> Dict[int, int]:
+        """Return operation ID -> topo rank using Kahn / BFS."""
+        return {op: rank for rank, op in enumerate(self._kahn_order(deps, all_ops))}
 
     def _create_enhanced_dependencies(self) -> List[Tuple[int, int, str]]:
         """Build sequential / parallel / cross-job dependencies without cycles."""
@@ -503,22 +478,8 @@ class FJSPEnv(gym.Env):
 
         # If seed changed or this is the first reset, regenerate everything
         if should_regenerate:
-            if seed is not None:
-                # New seed takes precedence
-                self._seed = seed  # Update the stored seed
-                # Update local RNGs
-                self.np_rng = np.random.RandomState(seed)
-                self.torch_gen = torch.Generator(device=self.device)
-                self.torch_gen.manual_seed(int(self.np_rng.randint(0, 2**31 - 1)))
-            elif self._seed is not None:
-                # If no new seed but a stored seed
-                self.np_rng = np.random.RandomState(self._seed)
-                self.torch_gen = torch.Generator(device=self.device)
-                self.torch_gen.manual_seed(int(self.np_rng.randint(0, 2**31 - 1)))
-            else:
-                self.np_rng = np.random.RandomState(None)
-                self.torch_gen = torch.Generator(device=self.device)
-                self.torch_gen.manual_seed(int(self.np_rng.randint(0, 2**31 - 1)))
+            rng_seed = seed if seed is not None else self._seed
+            self._reseed(rng_seed)
 
             # Generate job sequences
             self.job_sequences = self._create_job_sequences()
@@ -677,10 +638,6 @@ class FJSPEnv(gym.Env):
         if edge_index is None:
             return
         self.state[key].edge_attr = self._precede_attr_from_types(edge_index)
-
-    def _remove_operation_edges(self, operation: int):
-        """Remove all edges connected to a completed operation."""
-        self._remove_operations_edges([int(operation)])
 
     def _remove_operations_edges(self, operations: List[int]) -> None:
         """Batch-remove edges for completed operations; decrement successor dep counts."""
@@ -926,30 +883,6 @@ class FJSPEnv(gym.Env):
             mask = self._compute_action_mask(state)
         return np.flatnonzero(mask).astype(np.int64).tolist()
 
-    def _is_valid_action(self, action: Tuple[int, int], *, check_prereqs: bool = True) -> bool:
-        machine, operation = action
-        if not (0 <= machine < self.n_machines and 0 <= operation < self.n_operations):
-            return False
-        op_x = self.state["operation"].x
-        if float(op_x[operation, OP_SCHEDULED]) != 0.0:
-            return False
-        if float(op_x[operation, OP_FINISHED]) != 0.0:
-            return False
-        if not bool(self.eligibility_matrix[operation, machine].item()):
-            return False
-        if not check_prereqs:
-            return True
-
-        dep_edge_index = self.state["operation", "precede", "operation"].edge_index
-        if dep_edge_index.numel() == 0:
-            return True
-        prereqs_mask = dep_edge_index[1] == operation
-        if not prereqs_mask.any():
-            return True
-        prerequisites = dep_edge_index[0][prereqs_mask]
-        prereq_statuses = op_x[prerequisites, OP_SCHEDULED : OP_FINISHED + 1]
-        return bool(torch.all(torch.sum(prereq_statuses, dim=1) > 0))
-
     def _get_processing_operations(self) -> Tuple[torch.Tensor, int]:
         """
         Identify processing operations and count blocked machines.
@@ -1183,10 +1116,6 @@ class FJSPEnv(gym.Env):
         self.state["operation"].x[operation, OP_SCHEDULED] = 1
         self.state["operation"].x[operation, OP_PROCESSING] = 0
         self.state["operation"].x[operation, OP_REMAINING] = adjusted_time
-
-    def get_efficiency_modifier(self, operation: int, machine: int) -> float:
-        """Get the efficiency modifier for an operation-machine pair."""
-        return self.efficiency_modifiers[operation, machine].item()
 
     def estimated_completion(self) -> float:
         """Lower bound on makespan: clock plus max(queue, CP, remaining work / m).

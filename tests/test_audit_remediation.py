@@ -10,7 +10,7 @@ import torch
 from gymnasium import spaces
 from torch_geometric.data import HeteroData
 
-from config import get_default_train_config
+from config import get_debug_train_config
 from envs.fjsp_env import FJSPEnv, make_sb3_graph_observation_space
 from models.actor_critic import GraphActorCritic
 from models.graph_encoder import MESSAGE_EDGE_TYPES, GraphEncoder
@@ -26,7 +26,7 @@ from training.make_env import make_vec_env
 
 
 def test_fingerprint_ignores_seed_device_and_log_paths(tmp_path):
-    cfg = get_default_train_config().to_dict()
+    cfg = get_debug_train_config().to_dict()
     other = dict(cfg)
     other["seed"] = 999
     other["device"] = "cpu"
@@ -143,7 +143,7 @@ def test_efficiency_matrix_zero_for_missing_compatible_edges():
 
 
 def test_dummy_vec_render_does_not_raise():
-    cfg = get_default_train_config()
+    cfg = get_debug_train_config()
     cfg.n_envs = 1
     env = make_vec_env(cfg, n_envs=1, use_subprocess=False, for_eval=True)
     env.reset()

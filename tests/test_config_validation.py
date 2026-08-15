@@ -9,7 +9,7 @@ from config import (
     PPOConfig,
     TrainConfig,
     get_default_eval_config,
-    get_default_train_config,
+    get_debug_train_config,
     get_full_scale_eval_config,
     get_full_scale_train_config,
 )
@@ -52,7 +52,7 @@ def test_config_constructors_reject_invalid_values(factory, message):
 
 
 def test_default_configs_are_valid_and_ppo_batches_divide_rollout():
-    train_cfg = get_default_train_config()
+    train_cfg = get_debug_train_config()
     eval_cfg = get_default_eval_config()
 
     train_cfg.validate()
@@ -113,7 +113,7 @@ def test_train_cli_revalidates_after_mutation():
     )
 
     with pytest.raises(ValueError, match="n_machines"):
-        apply_args(get_default_train_config(), args)
+        apply_args(get_debug_train_config(), args)
 
 
 def test_eval_cli_revalidates_after_mutation():

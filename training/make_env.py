@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import gymnasium as gym
 import numpy as np
-from gymnasium import spaces
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecEnv
 from torch_geometric.data import HeteroData
 
@@ -46,11 +46,6 @@ def stack_fjsp_obs(obs_list: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def make_sb3_observation_space(n_actions: int) -> spaces.Dict:
-    """ Backward-compatible alias for the canonical GraphObs SB3 Dict space."""
-    return make_sb3_graph_observation_space(n_actions)
-
-
 def make_env_fn(
     cfg: TrainConfig,
     rank: int = 0,
@@ -66,21 +61,7 @@ def make_env_fn(
             seed = int(cfg.eval_seed) + int(rank)
         else:
             seed = worker_seed(cfg.seed, rank)
-        env = FJSPEnv(
-            n_machines=env_cfg.n_machines,
-            n_jobs=env_cfg.n_jobs,
-            avg_operations_per_job=env_cfg.avg_operations_per_job,
-            time_penalty=env_cfg.time_penalty,
-            max_operation_duration=env_cfg.max_operation_duration,
-            connection_drop_prob=env_cfg.connection_drop_prob,
-            compatible_efficiency_std=env_cfg.compatible_efficiency_std,
-            time_step=env_cfg.time_step,
-            min_eligible_machines=env_cfg.min_eligible_machines,
-            cross_job_dep_prob=env_cfg.cross_job_dep_prob,
-            shared_dep_prob=env_cfg.shared_dep_prob,
-            seed=seed,
-            device="cpu",
-        )
+        env = FJSPEnv(**asdict(env_cfg), seed=seed, device="cpu")
         monitor_path = None
         if monitor_dir is not None:
             monitor_path = f"{monitor_dir}/worker_{rank}"
@@ -108,7 +89,7 @@ class GraphDummyVecEnv(VecEnv):
         self.envs = [fn() for fn in env_fns]
         env = self.envs[0]
         n_actions = int(env.action_space.n)
-        observation_space = make_sb3_observation_space(n_actions)
+        observation_space = make_sb3_graph_observation_space(n_actions)
         super().__init__(
             num_envs=len(env_fns),
             observation_space=observation_space,
@@ -226,7 +207,7 @@ class GraphSubprocVecEnv(SubprocVecEnv):
         super().__init__(env_fns, start_method=start_method or "spawn")
         # Replace observation space with SB3-friendly Dict (graphs remain object arrays).
         n_actions = int(self.action_space.n)
-        self.observation_space = make_sb3_observation_space(n_actions)
+        self.observation_space = make_sb3_graph_observation_space(n_actions)
 
     def reset(self) -> Dict[str, Any]:
         # Match SB3 SubprocVecEnv: worker expects (seed, options), not None.
@@ -305,7 +286,6 @@ __all__ = [
     "GraphDummyVecEnv",
     "GraphSubprocVecEnv",
     "make_env_fn",
-    "make_sb3_observation_space",
     "make_vec_env",
     "stack_fjsp_obs",
 ]

@@ -97,17 +97,9 @@ def select_heuristic_action(env: FJSPEnv, rule: str) -> int:
     if valid.size == 0:
         raise ValueError("empty action mask")
 
-    best_action = int(valid[0])
-    best_score = _score_action(env, best_action, kind)
-    for action in valid[1:]:
-        action_i = int(action)
-        score = _score_action(env, action_i, kind)
-        better = score < best_score if minimize else score > best_score
-        # Tie → keep lower index (valid is ascending, so only replace on strict better).
-        if better:
-            best_score = score
-            best_action = action_i
-    return best_action
+    scores = np.array([_score_action(env, int(action), kind) for action in valid])
+    best_idx = int(np.argmin(scores) if minimize else np.argmax(scores))
+    return int(valid[best_idx])
 
 
 __all__ = [

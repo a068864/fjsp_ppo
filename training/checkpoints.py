@@ -138,19 +138,11 @@ def read_checkpoint_metadata(checkpoint_path: PathLike) -> Dict[str, Any]:
 
 
 def load_best_score(checkpoint_dir: PathLike) -> Optional[float]:
-    """Return the persisted best score, or None if absent.
-
-    Supports both legacy ``best_mean_reward`` and metric-tagged payloads
-    (``best_metric`` + ``best_score``).
-    """
-    path = best_score_path(checkpoint_dir)
-    if not path.is_file():
+    """Return the persisted best score, or None if absent."""
+    payload = load_best_score_record(checkpoint_dir)
+    if payload is None or "best_score" not in payload:
         return None
-    with path.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    if "best_score" in payload:
-        return float(payload["best_score"])
-    return float(payload["best_mean_reward"])
+    return float(payload["best_score"])
 
 
 def load_best_score_record(checkpoint_dir: PathLike) -> Optional[Dict[str, Any]]:
@@ -174,11 +166,6 @@ def save_best_score(
         "best_metric": str(metric),
         "best_score": float(best_score),
     }
-    # Legacy key for older loaders that only look for mean reward.
-    if metric == "mean_reward":
-        payload["best_mean_reward"] = float(best_score)
-    elif metric == "mean_makespan":
-        payload["best_mean_makespan"] = float(best_score)
     atomic_write_json(path, payload)
     return path
 
