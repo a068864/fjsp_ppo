@@ -114,7 +114,6 @@ def test_env_has_no_write_only_tracking_fields():
 
 def test_aggregate_eval_does_not_count_timeouts_as_failures():
     result = _aggregate_eval(
-        [0.0, 0.0, 0.0, 0.0],
         [1.0, 1.0, 1.0, 1.0],
         [1.0, 1.0, 1.0, 1.0],
         [1.0, 0.0, 0.0, 0.0],
