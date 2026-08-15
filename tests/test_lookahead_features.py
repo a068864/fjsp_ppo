@@ -88,3 +88,23 @@ def test_ready_clears_after_schedule():
     assert float(obs["graph"]["operation"].x[op, OP_READY]) == 0.0
     assert float(env.state["operation"].x[op, OP_SCHEDULED]) == 1.0
     env.close()
+
+
+def test_nonterminal_step_refreshes_lookahead_once(monkeypatch):
+    env = FJSPEnv(n_machines=3, n_jobs=2, avg_operations_per_job=2, seed=0, device="cpu")
+    obs, _ = env.reset(seed=0)
+    calls = {"n": 0}
+    orig = FJSPEnv._refresh_lookahead_features
+
+    def _counting(self):
+        calls["n"] += 1
+        return orig(self)
+
+    monkeypatch.setattr(FJSPEnv, "_refresh_lookahead_features", _counting)
+    action = int(np.flatnonzero(obs["action_mask"])[0])
+    _obs, _reward, terminated, truncated, _info = env.step(action)
+    if terminated or truncated:
+        env.close()
+        return
+    assert calls["n"] == 1
+    env.close()

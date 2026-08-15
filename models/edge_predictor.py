@@ -97,12 +97,38 @@ class EdgePredictor(nn.Module):
         """
         if machine_emb.dim() != 3 or operation_emb.dim() != 3:
             raise ValueError("forward_batched expects 3D embeddings")
-        batch_size = machine_emb.size(0)
-        outs = []
-        for i in range(batch_size):
-            eff_i = None if efficiency is None else efficiency[i]
-            outs.append(self._score_pair(machine_emb[i], operation_emb[i], eff_i))
-        return torch.stack(outs, dim=0)
+        batch_size, n_machines, hidden = machine_emb.shape
+        n_operations = operation_emb.size(1)
+        device = machine_emb.device
+        m_batch = torch.arange(batch_size, device=device).repeat_interleave(n_machines)
+        o_batch = torch.arange(batch_size, device=device).repeat_interleave(n_operations)
+        m = self.norm_m(
+            machine_emb.reshape(batch_size * n_machines, hidden),
+            batch=m_batch,
+            batch_size=batch_size,
+        ).view(batch_size, n_machines, hidden)
+        o = self.norm_o(
+            operation_emb.reshape(batch_size * n_operations, hidden),
+            batch=o_batch,
+            batch_size=batch_size,
+        ).view(batch_size, n_operations, hidden)
+        if self.predictor_type == "bilinear":
+            scores = torch.matmul(torch.matmul(m, self.interaction_weight), o.transpose(-1, -2))
+        else:
+            scores = torch.matmul(m, o.transpose(-1, -2))
+        logits = scores.div(self.scale).reshape(batch_size, n_machines * n_operations)
+        if efficiency is None:
+            return logits
+        eff = efficiency.to(device=logits.device, dtype=logits.dtype)
+        if eff.dim() == 2:
+            eff = eff.unsqueeze(0).expand(batch_size, -1, -1)
+        if eff.dim() != 3:
+            raise ValueError(
+                f"batched efficiency must be (B, n_ops, n_machines), got {tuple(eff.shape)}"
+            )
+        return logits + self.efficiency_scale * eff.transpose(1, 2).reshape(
+            batch_size, -1
+        )
 
     def forward(
         self,

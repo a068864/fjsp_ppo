@@ -414,18 +414,18 @@ class GraphEncoder(nn.Module):
         device = next(self.parameters()).device
         # Move local views only — never call data.to(device) in-place.
         local = HeteroData()
-        local["operation"].x = data["operation"].x.float().to(device, copy=True)
-        local["machine"].x = data["machine"].x.float().to(device, copy=True)
+        local["operation"].x = data["operation"].x.float().to(device)
+        local["machine"].x = data["machine"].x.float().to(device)
         for edge_type in EDGE_TYPES:
             if edge_type not in data.edge_types:
                 continue
             edge_index = data[edge_type].edge_index
             if edge_index is None or edge_index.numel() == 0:
                 continue
-            local[edge_type].edge_index = edge_index.to(device, copy=True)
+            local[edge_type].edge_index = edge_index.to(device)
             edge_attr = getattr(data[edge_type], "edge_attr", None)
             if edge_attr is not None:
-                local[edge_type].edge_attr = edge_attr.to(device, copy=True)
+                local[edge_type].edge_attr = edge_attr.to(device)
 
         x_dict = self._project_nodes(local)
         edge_index_dict, edge_attr_dict = self._message_edges(local)
@@ -476,20 +476,33 @@ class GraphEncoder(nn.Module):
 
         operation_emb = x_dict["operation"]
         machine_emb = x_dict["machine"]
-        # Prefer PyG pointers over repeated whole-batch boolean scans.
         op_ptr = batch["operation"].ptr
         mach_ptr = batch["machine"].ptr
-
-        machine_list = []
-        operation_list = []
-        graph_list = []
-        for i in range(len(graphs)):
-            op_i = operation_emb[op_ptr[i] : op_ptr[i + 1]]
-            mach_i = machine_emb[mach_ptr[i] : mach_ptr[i + 1]]
-            operation_list.append(op_i)
-            machine_list.append(mach_i)
-            graph_list.append(self._pool_graph(op_i, mach_i))
-        return machine_list, operation_list, torch.stack(graph_list, dim=0)
+        n_graph = len(graphs)
+        graph_emb_batch = self.graph_mlp(
+            torch.cat(
+                [
+                    self.operation_pool(
+                        operation_emb,
+                        index=batch["operation"].batch,
+                        dim_size=n_graph,
+                    ),
+                    self.machine_pool(
+                        machine_emb,
+                        index=batch["machine"].batch,
+                        dim_size=n_graph,
+                    ),
+                ],
+                dim=-1,
+            )
+        )
+        machine_list = [
+            machine_emb[mach_ptr[i] : mach_ptr[i + 1]] for i in range(n_graph)
+        ]
+        operation_list = [
+            operation_emb[op_ptr[i] : op_ptr[i + 1]] for i in range(n_graph)
+        ]
+        return machine_list, operation_list, graph_emb_batch
 
 
 __all__ = [

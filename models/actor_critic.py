@@ -137,6 +137,18 @@ class GraphActorCritic(nn.Module):
         return -ect / scale
 
     @staticmethod
+    def dispatch_score_matrix_batched(
+        duration: torch.Tensor,
+        workload: torch.Tensor,
+        efficiency: torch.Tensor,
+    ) -> torch.Tensor:
+        """Batched ECT-style pair scores ``(B, n_ops, n_machines)``."""
+        proc = duration.unsqueeze(2) * efficiency
+        ect = workload.unsqueeze(1) + proc
+        scale = duration.mean(dim=1).clamp(min=1.0).view(-1, 1, 1)
+        return -ect / scale
+
+    @staticmethod
     def _as_mask_list(
         action_mask: MaskInput,
         batch_size: int,
@@ -252,32 +264,57 @@ class GraphActorCritic(nn.Module):
         # Same-size graphs collate without changing embeddings (encode_batch
         # splits on ptr). Mixed sizes fall back to per-graph forwards.
         machine_list, operation_list, graph_emb_batch = self.encoder.encode_batch(graphs)
-        logits_list: List[torch.Tensor] = []
-        n_actions: Optional[int] = None
-        for i, graph in enumerate(graphs):
-            logits_i = self._assignment_logits(
-                graph, machine_list[i], operation_list[i], device
+        values = self.critic(graph_emb_batch).squeeze(-1)
+
+        n_machines = int(machine_list[0].size(0))
+        n_operations = int(operation_list[0].size(0))
+        same_size = all(int(m.size(0)) == n_machines for m in machine_list) and all(
+            int(o.size(0)) == n_operations for o in operation_list
+        )
+        if same_size:
+            machine_emb = torch.stack(machine_list, dim=0)
+            operation_emb = torch.stack(operation_list, dim=0)
+            efficiency = torch.stack(
+                [self.efficiency_matrix(graph, device) for graph in graphs], dim=0
             )
-            if n_actions is None:
-                n_actions = int(logits_i.numel())
-            elif int(logits_i.numel()) != n_actions:
+            duration = torch.stack(
+                [graph["operation"].x[:, 0] for graph in graphs], dim=0
+            ).to(device=device, dtype=torch.float32)
+            workload = torch.stack(
+                [graph["machine"].x[:, 1] for graph in graphs], dim=0
+            ).to(device=device, dtype=torch.float32)
+            dispatch = self.dispatch_score_matrix_batched(duration, workload, efficiency)
+            logits = self.actor(machine_emb, operation_emb, dispatch)
+        else:
+            logits_list = [
+                self._assignment_logits(graph, machine_list[i], operation_list[i], device)
+                for i, graph in enumerate(graphs)
+            ]
+            n_actions_i = {int(t.numel()) for t in logits_list}
+            if len(n_actions_i) != 1:
                 raise ValueError(
                     "All graphs in a batch must share the same action dimension; "
-                    f"got {logits_i.numel()} vs {n_actions}"
+                    f"got {sorted(n_actions_i)}"
                 )
-            logits_list.append(logits_i)
+            logits = torch.stack(logits_list, dim=0)
 
-        assert n_actions is not None
-        values = self.critic(graph_emb_batch).squeeze(-1)
-        masks = self._as_mask_list(action_mask, batch_size, n_actions, device)
-        masked = [
-            self.apply_action_mask(logits, None if masks is None else masks[i])
-            for i, logits in enumerate(logits_list)
-        ]
+        n_actions = int(logits.size(-1))
+        if action_mask is not None:
+            if isinstance(action_mask, torch.Tensor) and action_mask.dim() == 2:
+                mask = action_mask.to(device=logits.device, dtype=logits.dtype)
+                if tuple(mask.shape) != tuple(logits.shape):
+                    raise ValueError(
+                        f"Mask shape {tuple(mask.shape)} does not match logits {tuple(logits.shape)}"
+                    )
+                logits = logits.masked_fill(mask < 0.5, MASK_LOGIT)
+            else:
+                masks = self._as_mask_list(action_mask, batch_size, n_actions, device)
+                assert masks is not None
+                logits = logits.masked_fill(torch.stack(masks, dim=0) < 0.5, MASK_LOGIT)
 
         if batch_size == 1:
-            return masked[0], values.squeeze(0)
-        return torch.stack(masked, dim=0), values
+            return logits.reshape(-1), values.squeeze(0)
+        return logits, values
 
     def get_value(self, data: GraphInput) -> torch.Tensor:
         """Return critic value(s) only (skips the actor / edge predictor)."""

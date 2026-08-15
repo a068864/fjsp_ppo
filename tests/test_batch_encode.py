@@ -245,6 +245,23 @@ def test_predictor_logits_are_pairwise():
         assert torch.allclose(base[:, 2], changed[:, 2])
 
 
+def test_forward_batched_matches_per_graph_scores():
+    torch.manual_seed(0)
+    predictor = EdgePredictor(hidden_dim=8, predictor_type="bilinear")
+    predictor.eval()
+    machines = torch.randn(4, 2, 8)
+    operations = torch.randn(4, 3, 8)
+    efficiency = torch.rand(4, 3, 2)
+    with torch.no_grad():
+        batched = predictor(machines, operations, efficiency)
+        looped = torch.stack(
+            [predictor(machines[i], operations[i], efficiency[i]) for i in range(4)],
+            dim=0,
+        )
+    assert batched.shape == (4, 6)
+    assert torch.allclose(batched, looped, atol=1e-5)
+
+
 def test_bilinear_predictor_uses_efficiency_bias():
     torch.manual_seed(0)
     predictor = EdgePredictor(hidden_dim=8, predictor_type="bilinear")

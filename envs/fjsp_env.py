@@ -220,6 +220,8 @@ class FJSPEnv(gym.Env):
         self.last_success = False
         self._episode_steps = 0
         self._cached_action_mask: Optional[np.ndarray] = None
+        self._lookahead_stale = True
+        self._ready_ops: Optional[torch.Tensor] = None
         self._zero = torch.tensor(0.0, device=self.device)
         self._one = torch.tensor(1.0, device=self.device)
         self._done_status = torch.tensor([0.0, 0.0, 1.0], device=self.device)
@@ -603,7 +605,7 @@ class FJSPEnv(gym.Env):
         self.makespan = float("inf")
         self.last_success = False
         self._episode_steps = 0
-        self._cached_action_mask = None
+        self._mark_lookahead_stale()
 
         obs = self._get_obs()
         info = self._get_info(success=False, action_mask=obs["action_mask"])
@@ -615,6 +617,28 @@ class FJSPEnv(gym.Env):
         ("operation", "next", "operation"),
         ("operation", "precede", "operation"),
     )
+
+    def _mark_lookahead_stale(self) -> None:
+        """Invalidate CP / ready / action-mask caches after graph mutation."""
+        self._lookahead_stale = True
+        self._ready_ops = None
+        self._cached_action_mask = None
+
+    def _ensure_lookahead_features(self) -> None:
+        if self._lookahead_stale:
+            self._refresh_lookahead_features()
+
+    def _precede_attrs_aligned(self) -> bool:
+        if self.state is None:
+            return True
+        key = ("operation", "precede", "operation")
+        if key not in self.state.edge_types:
+            return True
+        edge_index = self.state[key].edge_index
+        attr = getattr(self.state[key], "edge_attr", None)
+        if edge_index is None or edge_index.numel() == 0:
+            return attr is None or int(attr.size(0)) == 0
+        return attr is not None and int(attr.size(0)) == int(edge_index.size(1))
 
     def _precede_attr_from_types(self, edge_index: torch.Tensor) -> torch.Tensor:
         """Dep-type scalar per precede edge (sequential=1, parallel=2, cross_job=3)."""
@@ -728,58 +752,83 @@ class FJSPEnv(gym.Env):
                 prereq_ok[bad_dst.unique()] = False
         return unscheduled & prereq_ok
 
+    def _job_remaining_features(
+        self, remaining: torch.Tensor, finished: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Per-op remaining work / count of unfinished members of the same job."""
+        n = int(remaining.size(0))
+        job_work = remaining.new_zeros(n)
+        job_ops = remaining.new_zeros(n)
+        if not self.job_sequences:
+            return job_work, job_ops
+        job_id = torch.zeros(n, dtype=torch.long, device=remaining.device)
+        for job_idx, seq in enumerate(self.job_sequences):
+            if seq:
+                job_id[seq] = job_idx
+        n_jobs = len(self.job_sequences)
+        alive = (~finished).to(dtype=remaining.dtype)
+        work = remaining.new_zeros(n_jobs)
+        ops = remaining.new_zeros(n_jobs)
+        work.scatter_add_(0, job_id, remaining * alive)
+        ops.scatter_add_(0, job_id, alive)
+        return work[job_id], ops[job_id]
+
+    @staticmethod
+    def _critical_path_remaining(
+        remaining: torch.Tensor,
+        finished: torch.Tensor,
+        dep: torch.Tensor,
+    ) -> torch.Tensor:
+        """Longest remaining-duration path through successors, including this op."""
+        n = int(remaining.size(0))
+        rem_np = remaining.detach().cpu().numpy()
+        fin_np = finished.detach().cpu().numpy()
+        cp = np.where(fin_np, 0.0, rem_np.astype(np.float64, copy=False))
+        if dep.numel() == 0:
+            return torch.as_tensor(cp, dtype=remaining.dtype, device=remaining.device)
+        dep_np = dep.detach().cpu().numpy()
+        succ: List[List[int]] = [[] for _ in range(n)]
+        indeg = np.zeros(n, dtype=np.int32)
+        for src, dst in zip(dep_np[0], dep_np[1]):
+            u, v = int(src), int(dst)
+            succ[u].append(v)
+            indeg[v] += 1
+        order: List[int] = []
+        queue = deque(np.flatnonzero(indeg == 0).tolist())
+        while queue:
+            u = queue.popleft()
+            order.append(u)
+            for v in succ[u]:
+                indeg[v] -= 1
+                if indeg[v] == 0:
+                    queue.append(v)
+        for u in reversed(order):
+            if fin_np[u]:
+                continue
+            best = 0.0
+            for v in succ[u]:
+                if cp[v] > best:
+                    best = cp[v]
+            cp[u] = float(rem_np[u]) + best
+        return torch.as_tensor(cp, dtype=remaining.dtype, device=remaining.device)
+
     def _refresh_lookahead_features(self) -> None:
         """Write CP remaining, job remaining, and ready flag onto operation.x."""
         if self.state is None or "operation" not in self.state.node_types:
+            self._lookahead_stale = False
             return
         op_x = self.state["operation"].x
         remaining = op_x[:, OP_REMAINING]
         finished = op_x[:, OP_FINISHED] > 0.5
         ready = self._ready_operation_mask()
+        self._ready_ops = ready
         op_x[:, OP_READY] = ready.to(dtype=op_x.dtype)
-
-        job_work = torch.zeros_like(remaining)
-        job_ops = torch.zeros_like(remaining)
-        if self.job_sequences:
-            for seq in self.job_sequences:
-                members = torch.tensor(seq, dtype=torch.long, device=op_x.device)
-                alive = ~finished[members]
-                job_work[members] = remaining[members][alive].sum()
-                job_ops[members] = alive.to(dtype=op_x.dtype).sum()
+        job_work, job_ops = self._job_remaining_features(remaining, finished)
         op_x[:, OP_JOB_REMAINING_WORK] = job_work
         op_x[:, OP_JOB_REMAINING_OPS] = job_ops
-
-        # Longest remaining-duration path through successors, including this op.
-        cp = remaining.masked_fill(finished, 0.0)
         dep = self.state["operation", "precede", "operation"].edge_index
-        n = int(op_x.size(0))
-        if dep.numel() > 0:
-            succ: List[List[int]] = [[] for _ in range(n)]
-            indeg = [0] * n
-            for src, dst in dep.t().tolist():
-                succ[int(src)].append(int(dst))
-                indeg[int(dst)] += 1
-            order: List[int] = []
-            queue = deque(i for i in range(n) if indeg[i] == 0)
-            while queue:
-                u = queue.popleft()
-                order.append(u)
-                for v in succ[u]:
-                    indeg[v] -= 1
-                    if indeg[v] == 0:
-                        queue.append(v)
-            rem = remaining.detach().tolist()
-            fin = finished.detach().tolist()
-            cp_list = [0.0 if fin[i] else float(rem[i]) for i in range(n)]
-            for u in reversed(order):
-                if fin[u]:
-                    continue
-                best = 0.0
-                for v in succ[u]:
-                    best = max(best, cp_list[v])
-                cp_list[u] = float(rem[u]) + best
-            cp = torch.tensor(cp_list, dtype=op_x.dtype, device=op_x.device)
-        op_x[:, OP_CP_REMAINING] = cp
+        op_x[:, OP_CP_REMAINING] = self._critical_path_remaining(remaining, finished, dep)
+        self._lookahead_stale = False
 
     def _compute_action_mask(self, state: Optional[HeteroData] = None) -> np.ndarray:
         """Vectorized valid-action mask: unscheduled ∧ prereqs started ∧ eligible."""
@@ -789,7 +838,14 @@ class FJSPEnv(gym.Env):
         if state is None or "operation" not in state.node_types:
             return np.zeros((n_actions,), dtype=np.float32)
 
-        ready_ops = self._ready_operation_mask(state)
+        if (
+            (state is None or state is self.state)
+            and self._ready_ops is not None
+            and self._ready_ops.numel() == self.n_operations
+        ):
+            ready_ops = self._ready_ops
+        else:
+            ready_ops = self._ready_operation_mask(state)
         # eligibility: (n_ops, n_machines); action layout is machine-major.
         elig = self.eligibility_matrix & ready_ops.unsqueeze(1)
         return elig.T.reshape(-1).to(dtype=torch.float32).detach().cpu().numpy()
@@ -851,8 +907,9 @@ class FJSPEnv(gym.Env):
 
     def _get_obs(self) -> Dict[str, Any]:
         """Build the opaque graph observation dict."""
-        self._refresh_lookahead_features()
-        self._sync_precede_attrs()
+        self._ensure_lookahead_features()
+        if not self._precede_attrs_aligned():
+            self._sync_precede_attrs()
         graph = self._policy_graph_snapshot()
         return {
             "dummy": np.zeros((1,), dtype=np.float32),
@@ -955,6 +1012,7 @@ class FJSPEnv(gym.Env):
         dt = float(self.time_step) * int(n_ticks)
         dt_t = torch.tensor(dt, device=self.device)
         self._advance_clock(dt)
+        self._mark_lookahead_stale()
         if not bool(processing_ops.any().item()):
             return []
 
@@ -1116,6 +1174,7 @@ class FJSPEnv(gym.Env):
         self.state["operation"].x[operation, OP_SCHEDULED] = 1
         self.state["operation"].x[operation, OP_PROCESSING] = 0
         self.state["operation"].x[operation, OP_REMAINING] = adjusted_time
+        self._mark_lookahead_stale()
 
     def estimated_completion(self) -> float:
         """Lower bound on makespan: clock plus max(queue, CP, remaining work / m).
@@ -1126,7 +1185,7 @@ class FJSPEnv(gym.Env):
         """
         if self.state is None:
             return float(self.current_time)
-        self._refresh_lookahead_features()
+        self._ensure_lookahead_features()
         workload = self.state["machine"].x[:, MACH_WORKLOAD]
         n_m = max(int(workload.numel()), 1)
         max_wl = float(workload.max().item()) if workload.numel() else 0.0
@@ -1197,7 +1256,7 @@ class FJSPEnv(gym.Env):
             self.last_success = False
             self.makespan = float("inf")
             obs = self._get_obs()
-            info = self._get_info(success=False)
+            info = self._get_info(success=False, action_mask=obs["action_mask"])
             info["is_gridlock"] = True
             return obs, float(reward), True, False, info
 
@@ -1246,6 +1305,7 @@ class FJSPEnv(gym.Env):
         reward = 0.0
         guard = 0
         max_ticks = max(10_000, int(self.n_operations * self.max_operation_duration * 4) + 1)
+        after = self.estimated_completion()
 
         while True:
             op_features = self.state["operation"].x
@@ -1264,9 +1324,10 @@ class FJSPEnv(gym.Env):
 
             k = min(self._ticks_to_next_completion(processing_ops), max_ticks - guard)
             k = max(1, k)
-            before = self.estimated_completion()
+            before = after
             self._apply_processing_work(k, processing_ops)
-            reward += self._completion_delta_reward(before, self.estimated_completion())
+            after = self.estimated_completion()
+            reward += self._completion_delta_reward(before, after)
             guard += k
             if guard > max_ticks:
                 return reward, False
