@@ -123,3 +123,36 @@ def test_reset_estimated_completion_uses_critical_path():
     work_lb = float(op_x[unfinished, OP_REMAINING].sum().item()) / float(env.n_machines)
     assert env.estimated_completion() == pytest.approx(max(cp, work_lb), abs=1e-4)
     env.close()
+
+
+def test_successful_episode_logs_classic_makespan_not_clock():
+    """Logged makespan is earliest-start Cmax; the PPO reward stays the bound delta."""
+    from solvers.milp import decode_assignment_schedule
+
+    env = FJSPEnv(n_machines=3, n_jobs=2, avg_operations_per_job=2, seed=0, device="cpu")
+    obs, _ = env.reset(seed=0)
+    before = env.estimated_completion()
+    action = int(np.flatnonzero(obs["action_mask"])[0])
+    obs, first_reward, terminated, truncated, _info = env.step(action)
+    after = env.estimated_completion()
+    if not (terminated or truncated):
+        assert float(first_reward) == pytest.approx(
+            float(env.time_penalty) * (after - before), abs=1e-5
+        )
+    done = bool(terminated or truncated)
+    info = _info
+    while not done:
+        mask = np.asarray(obs["action_mask"])
+        valid = np.flatnonzero(mask > 0.5)
+        if valid.size == 0:
+            env.close()
+            pytest.skip("empty mask before success")
+        obs, _r, terminated, truncated, info = env.step(int(valid[0]))
+        done = bool(terminated or truncated)
+    if not info.get("success"):
+        env.close()
+        pytest.skip("episode did not succeed")
+    decoded = decode_assignment_schedule(env._schedule_instance, env._assignment_order)
+    assert info["makespan"] == pytest.approx(decoded.makespan)
+    assert decoded.makespan <= env.current_time + 1e-6
+    env.close()

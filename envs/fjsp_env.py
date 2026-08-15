@@ -219,6 +219,8 @@ class FJSPEnv(gym.Env):
 
         self.last_success = False
         self._episode_steps = 0
+        self._assignment_order: List[Tuple[int, int]] = []
+        self._schedule_instance: Any = None
         self._cached_action_mask: Optional[np.ndarray] = None
         self._lookahead_stale = True
         self._ready_ops: Optional[torch.Tensor] = None
@@ -605,6 +607,7 @@ class FJSPEnv(gym.Env):
         self.makespan = float("inf")
         self.last_success = False
         self._episode_steps = 0
+        self._begin_episode_schedule()
         self._mark_lookahead_stale()
 
         obs = self._get_obs()
@@ -617,6 +620,26 @@ class FJSPEnv(gym.Env):
         ("operation", "next", "operation"),
         ("operation", "precede", "operation"),
     )
+
+    def _begin_episode_schedule(self) -> None:
+        """Snapshot static instance data and clear the assignment sequence."""
+        from solvers.milp import extract_fjsp_instance
+
+        self._assignment_order = []
+        self._schedule_instance = extract_fjsp_instance(self)
+
+    def _classic_logged_makespan(self, success: bool) -> float:
+        """Earliest-start Cmax of the inferred assignment sequence, or inf."""
+        if not success or self._schedule_instance is None:
+            return float("inf")
+        from solvers.milp import decode_assignment_schedule
+
+        decoded = decode_assignment_schedule(
+            self._schedule_instance, self._assignment_order
+        )
+        if decoded.status != "Feasible":
+            return float("inf")
+        return float(decoded.makespan)
 
     def _mark_lookahead_stale(self) -> None:
         """Invalidate CP / ready / action-mask caches after graph mutation."""
@@ -925,7 +948,7 @@ class FJSPEnv(gym.Env):
         """Build the info dict for reset/step."""
         mask = action_mask if action_mask is not None else self.get_action_mask()
         return {
-            "makespan": float(self.makespan),
+            "makespan": float(self.makespan),  # classic Cmax on success; inf otherwise
             "success": bool(success),
             "current_time": float(self.current_time),
             "n_valid_actions": int(np.sum(mask)),
@@ -1135,6 +1158,7 @@ class FJSPEnv(gym.Env):
         """
         # Verify machine eligibility
         assert self.eligibility_matrix[operation, machine], f"Machine {machine} is not eligible for operation {operation}"
+        self._assignment_order.append((int(operation), int(machine)))
 
         proc_edges = self.state['machine', 'processing', 'operation'].edge_index
 
@@ -1278,7 +1302,7 @@ class FJSPEnv(gym.Env):
             r, success = self.rollout()
             reward += r
             if success:
-                self.makespan = self.current_time
+                self.makespan = self._classic_logged_makespan(True)
             else:
                 reward += self.failure_penalty()
             self.last_success = bool(success)
