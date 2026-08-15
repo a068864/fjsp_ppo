@@ -13,6 +13,7 @@ from envs.fjsp_env import (
     OP_FINISHED,
     OP_REMAINING,
     OP_SEQ_DEPS,
+    OP_CP_REMAINING,
     FJSPEnv,
 )
 from models.actor_critic import GraphActorCritic
@@ -23,11 +24,11 @@ def test_debug_ppo_uses_full_horizon_gae_and_low_entropy():
     assert cfg.ppo.gae_lambda == pytest.approx(1.0)
     assert cfg.ppo.ent_coef == pytest.approx(0.01)
     assert cfg.ppo.gamma == pytest.approx(1.0)
-    assert cfg.ppo.n_epochs == 4
+    assert cfg.ppo.n_epochs == 6
     assert cfg.ppo.vf_coef == pytest.approx(0.25)
-    assert cfg.ppo.max_grad_norm == pytest.approx(2.0)
+    assert cfg.ppo.max_grad_norm == pytest.approx(5.0)
     assert cfg.ppo.target_kl == pytest.approx(0.02)
-    assert cfg.lr_end_fraction == pytest.approx(0.5)
+    assert cfg.lr_end_fraction == pytest.approx(0.8)
 
 
 def test_nonterminal_step_reward_tracks_completion_bound():
@@ -111,3 +112,14 @@ def test_dispatch_score_prefers_lower_ect():
         graph, faster_first, torch.device("cpu")
     )
     assert float(scores_fast[0, 0]) > float(scores_fast[0, 1])
+
+
+def test_reset_estimated_completion_uses_critical_path():
+    env = FJSPEnv(n_machines=5, n_jobs=3, avg_operations_per_job=4, seed=0, device="cpu")
+    env.reset(seed=0)
+    op_x = env.state["operation"].x
+    unfinished = op_x[:, OP_FINISHED] < 0.5
+    cp = float(op_x[unfinished, OP_CP_REMAINING].max().item())
+    work_lb = float(op_x[unfinished, OP_REMAINING].sum().item()) / float(env.n_machines)
+    assert env.estimated_completion() == pytest.approx(max(cp, work_lb), abs=1e-4)
+    env.close()

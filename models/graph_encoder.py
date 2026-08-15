@@ -12,7 +12,23 @@ from torch_geometric.nn import AttentionalAggregation, HeteroConv, TransformerCo
 
 from utils import get_logger
 
+from envs.fjsp_env import (
+    MACH_IDLE_DURATION,
+    MACH_WORKLOAD,
+    OP_CP_REMAINING,
+    OP_DURATION,
+    OP_JOB_REMAINING_WORK,
+    OP_REMAINING,
+)
+
 logger = get_logger(__name__)
+
+_OP_TIME_COLS = (
+    OP_DURATION,
+    OP_REMAINING,
+    OP_CP_REMAINING,
+    OP_JOB_REMAINING_WORK,
+)
 
 EDGE_TYPES: List[Tuple[str, str, str]] = [
     ("operation", "precede", "operation"),
@@ -233,10 +249,50 @@ class GraphEncoder(nn.Module):
                 f"got {mach_x.size(-1)}"
             )
 
+        op_x, mach_x = self._normalize_time_features(
+            op_x,
+            mach_x,
+            op_batch=getattr(data["operation"], "batch", None),
+            mach_batch=getattr(data["machine"], "batch", None),
+        )
         return {
             "operation": self.operation_encoder(op_x),
             "machine": self.machine_encoder(mach_x),
         }
+
+    @staticmethod
+    def _normalize_time_features(
+        op_x: torch.Tensor,
+        mach_x: torch.Tensor,
+        op_batch: torch.Tensor | None = None,
+        mach_batch: torch.Tensor | None = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Per-graph mean duration scale so collation cannot mix instance units."""
+        op_x = op_x.clone()
+        mach_x = mach_x.clone()
+        if op_batch is None:
+            scale = op_x[:, OP_DURATION].mean().clamp(min=1.0)
+            op_x[:, list(_OP_TIME_COLS)] = op_x[:, list(_OP_TIME_COLS)] / scale
+            mach_x[:, MACH_WORKLOAD] = mach_x[:, MACH_WORKLOAD] / scale
+            mach_x[:, MACH_IDLE_DURATION] = mach_x[:, MACH_IDLE_DURATION] / scale
+            return op_x, mach_x
+
+        n_graph = int(op_batch.max().item()) + 1
+        dur = op_x[:, OP_DURATION]
+        sums = torch.zeros(n_graph, device=op_x.device, dtype=op_x.dtype)
+        counts = torch.zeros(n_graph, device=op_x.device, dtype=op_x.dtype)
+        sums.scatter_add_(0, op_batch, dur)
+        counts.scatter_add_(0, op_batch, torch.ones_like(dur))
+        scale = (sums / counts.clamp(min=1.0)).clamp(min=1.0)
+        op_scale = scale[op_batch].unsqueeze(1)
+        op_x[:, list(_OP_TIME_COLS)] = op_x[:, list(_OP_TIME_COLS)] / op_scale
+        if mach_batch is None:
+            mach_scale = scale.mean()
+        else:
+            mach_scale = scale[mach_batch]
+        mach_x[:, MACH_WORKLOAD] = mach_x[:, MACH_WORKLOAD] / mach_scale
+        mach_x[:, MACH_IDLE_DURATION] = mach_x[:, MACH_IDLE_DURATION] / mach_scale
+        return op_x, mach_x
 
     def _message_edges(
         self, data: HeteroData

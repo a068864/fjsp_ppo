@@ -36,7 +36,7 @@ class EdgePredictor(nn.Module):
 
         self.hidden_dim = hidden_dim
         self.predictor_type = predictor_type
-        self.efficiency_scale = nn.Parameter(torch.tensor(1.0))
+        self.efficiency_scale = nn.Parameter(torch.tensor(0.1))
 
         self.norm_m = GraphNorm(hidden_dim)
         self.norm_o = GraphNorm(hidden_dim)
@@ -135,8 +135,8 @@ class EdgePredictor(nn.Module):
 
     def reset_parameters(self) -> None:
         """Reset efficiency bias and bilinear metric to the PPO-safe prior."""
-        # ECT residual prior; 1.0 matches score units of -ECT/mean_duration.
-        nn.init.constant_(self.efficiency_scale, 1.0)
+        # Weak ECT residual (1.0 cloned greedy dispatch; GNN logits are ~0.7 std).
+        nn.init.constant_(self.efficiency_scale, 0.1)
         if self.predictor_type == "bilinear":
             # Start as identity so init logits match scaled dot-product;
             # kaiming on HxH is too heavy and collapses policy entropy.

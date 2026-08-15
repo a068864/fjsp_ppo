@@ -1189,12 +1189,27 @@ class FJSPEnv(gym.Env):
         return self.efficiency_modifiers[operation, machine].item()
 
     def estimated_completion(self) -> float:
-        """Lower bound on makespan: clock plus remaining queued machine work."""
+        """Lower bound on makespan: clock plus max(queue, CP, remaining work / m).
+
+        Workload-only bound is the ECT objective and cannot credit starting a
+        long precedence chain on an idle machine. Mix in unfinished critical
+        path and work conservation so the shaped reward is not greedy load-balancing.
+        """
         if self.state is None:
             return float(self.current_time)
+        self._refresh_lookahead_features()
         workload = self.state["machine"].x[:, MACH_WORKLOAD]
+        n_m = max(int(workload.numel()), 1)
         max_wl = float(workload.max().item()) if workload.numel() else 0.0
-        return float(self.current_time) + max_wl
+        op_x = self.state["operation"].x
+        unfinished = op_x[:, OP_FINISHED] < 0.5
+        max_cp = 0.0
+        work_lb = 0.0
+        if bool(unfinished.any().item()):
+            live = op_x[unfinished]
+            max_cp = float(live[:, OP_CP_REMAINING].max().item())
+            work_lb = float(live[:, OP_REMAINING].sum().item()) / float(n_m)
+        return float(self.current_time) + max(max_wl, max_cp, work_lb)
 
     def failure_penalty(self) -> float:
         """Return worse than serial processing at max duration and slowdown."""

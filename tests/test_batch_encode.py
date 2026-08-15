@@ -7,7 +7,15 @@ import torch
 from torch_geometric.nn import TransformerConv
 
 from config import ModelConfig, get_debug_train_config
-from envs.fjsp_env import FJSPEnv
+from envs.fjsp_env import (
+    FJSPEnv,
+    MACH_IDLE_DURATION,
+    MACH_WORKLOAD,
+    OP_CP_REMAINING,
+    OP_DURATION,
+    OP_JOB_REMAINING_WORK,
+    OP_REMAINING,
+)
 from models.actor_critic import GraphActorCritic
 from models.edge_predictor import EdgePredictor
 from models.graph_encoder import GraphEncoder, REVERSE_EDGE_TYPES
@@ -198,6 +206,26 @@ def test_precede_dep_type_attrs_reach_operation_embeddings():
     env.close()
 
 
+def test_encoder_time_features_are_scale_invariant():
+    env = FJSPEnv(n_machines=3, n_jobs=2, avg_operations_per_job=2, seed=0, device="cpu")
+    graph = env.reset(seed=0)[0]["graph"]
+    scaled = graph.clone()
+    for col in (OP_DURATION, OP_REMAINING, OP_CP_REMAINING, OP_JOB_REMAINING_WORK):
+        scaled["operation"].x[:, col] = scaled["operation"].x[:, col] * 2
+    scaled["machine"].x[:, MACH_WORKLOAD] = scaled["machine"].x[:, MACH_WORKLOAD] * 2
+    scaled["machine"].x[:, MACH_IDLE_DURATION] = (
+        scaled["machine"].x[:, MACH_IDLE_DURATION] * 2
+    )
+    enc = GraphEncoder(hidden_dim=16, num_layers=1, num_heads=2, dropout=0.0)
+    enc.eval()
+    with torch.no_grad():
+        _ma, ops_a, g_a = enc(graph)
+        _mb, ops_b, g_b = enc(scaled)
+    assert torch.allclose(ops_a, ops_b, atol=1e-5)
+    assert torch.allclose(g_a, g_b, atol=1e-5)
+    env.close()
+
+
 def test_predictor_logits_are_pairwise():
     torch.manual_seed(0)
     machines = torch.randn(2, 8)
@@ -224,6 +252,7 @@ def test_bilinear_predictor_uses_efficiency_bias():
     machines = torch.randn(2, 8)
     operations = torch.randn(3, 8)
     with torch.no_grad():
+        predictor.efficiency_scale.fill_(1.0)
         without_eff = predictor(machines, operations, None)
         with_eff = predictor(machines, operations, torch.ones(3, 2))
     assert without_eff.shape == (6,)

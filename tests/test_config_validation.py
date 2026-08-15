@@ -62,7 +62,7 @@ def test_default_configs_are_valid_and_ppo_batches_divide_rollout():
     assert train_cfg.env.n_jobs == 3
     assert train_cfg.env.avg_operations_per_job == 4
     assert train_cfg.model.hidden_dim == 64
-    assert train_cfg.model.num_layers == 2
+    assert train_cfg.model.num_layers == 3
     assert train_cfg.model.operation_in_dim == OP_FEATURE_DIM
     assert train_cfg.model.machine_in_dim == MACH_FEATURE_DIM
     assert train_cfg.ppo.total_timesteps == 65_536
