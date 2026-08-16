@@ -401,8 +401,8 @@ class FJSPEnv(gym.Env):
                 u, v = job_sequence[i], job_sequence[i + 1]
                 _try_add(u, v, "sequential")
 
-        # Skip edges are transitive on a chain; still add them so shared_dep_prob
-        # and OP_PAR_DEPS are live. Cycle check remains.
+        # Extra within-job precedences so an op can have later successors
+        # besides its sequential neighbor (OP_PAR_DEPS). Cycle check remains.
         for job_sequence in self.job_sequences:
             job_length = len(job_sequence)
             for i in range(job_length - 2):

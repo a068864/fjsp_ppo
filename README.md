@@ -7,7 +7,7 @@ Deep Reinforcement Learning for **Flexible Job Shop Scheduling (FJSP)** using:
 - Gymnasium
 - CUDA / Apple Metal (MPS), with CPU fallback
 
-The environment state is a PyTorch Geometric `HeteroData` graph. A custom SB3 policy encodes the graph with heterogeneous convolutions, scores machine–operation pairs with an `EdgePredictor` (including compatibility efficiency), and masks invalid actions with `-1e9` before sampling.
+The environment state is a PyTorch Geometric `HeteroData` graph. A custom SB3 policy encodes the graph with heterogeneous convolutions, scores machine–operation pairs with an `EdgePredictor` (including compatibility efficiency), and masks invalid actions with `-1e9` before sampling. The agent is **constructive**: each `step()` assigns one eligible `(machine, operation)` pair until every operation is scheduled. Training uses a lower-bound reward; evaluation and baselines report classic earliest-start $C_{\mathrm{max}}$.
 
 **Supported Python:** 3.10–3.13.
 
@@ -20,7 +20,134 @@ python benchmark.py --full-scale --n-env-steps 64 --dummy-vec
 
 ---
 
+
+
+## Problem
+
+**Job Shop Scheduling (JSP)** assigns each operation to a single predetermined machine. Jobs are linear chains: operation *k*+1 of a job cannot start until operation *k* finishes.
+
+**Flexible Job Shop Scheduling (FJSP)** relaxes the machine constraint. Each operation may run on a subset of machines, usually with different processing times. The decision at every assignment is both *which ready operation* and *which eligible machine*.
+
+This project's instance generator is richer than textbook FJSP:
+
+- **Efficiency.** Eligible machine–operation pairs get a speed multiplier ~N(1, σ) clamped to [0.5, 1.5]. Processing time is `duration × efficiency` (higher factor = slower). Eligibility itself is sparse: each op keeps at least `min_eligible_machines` machines, then extra connections are dropped with `connection_drop_prob`.
+- **Multiple successors.** After the sequential job chain, extra within-job `parallel` precedences may link an op to later ops in the same job (`shared_dep_prob`). One task can have several successors, and a later task several predecessors.
+- **Cross-job DAG.** Additional precedences may link operations of different jobs (`cross_job_dep_prob`). Edges are rejected if they would cycle or duplicate an existing path.
+
+Toy instance (two jobs). Solid arrows are sequential; dashed is a parallel (extra successor in the same job); the labeled edge is cross-job. An operation is mask-ready once every predecessor has **started**.
+
+```mermaid
+graph LR
+  subgraph J0[Job 0]
+    o0[op 0] --> o1[op 1] --> o2[op 2]
+    o0 -.->|parallel| o2
+  end
+  subgraph J1[Job 1]
+    o3[op 3] --> o4[op 4]
+  end
+  o1 -->|cross-job| o4
+```
+
+
+
+The policy never outputs a full timetable. It builds a schedule **one assignment at a time** under a ready-operation mask.
+
+---
+
+
+
+## Approach
+
+Pipeline:
+
+1. **Graph** — live `HeteroData` of operations and machines (node features + typed edges).
+2. **Encoder** — heterogeneous Transformer convolutions produce node embeddings.
+3. **Masked logits** — an `EdgePredictor` scores every `(machine, operation)` pair; invalid actions get `-1e9`.
+4. **PPO** — `GraphPPO` updates the shared encoder / actor / critic from those masked categoricals.
+5. **Classic $C_{\mathrm{max}}$** — evaluation decodes the assignment sequence into earliest-start completion times and reports the latest finish. That is the same objective the MILP minimizes.
+
+Action encoding: `action = machine_id * n_operations + operation_id`.
+
+---
+
+
+
+## Environment
+
+`FJSPEnv` (`envs/fjsp_env.py`) is a Gymnasium env. Seedless `reset()` samples a **new instance** by default so vectorized training sees diverse graphs (`reuse_instance` is the fast cached path).
+
+**Sampling.** Operations are partitioned into `n_jobs` non-empty sequences (Poisson sizes around `avg_operations_per_job`). Durations are log-normal, clamped to `[time_step, max_operation_duration]`. Then eligibility, efficiency, sequential / parallel / cross-job edges are drawn as above.
+
+**Node features**
+
+
+| Node      | Dim | Contents                                                                                                                                                                             |
+| --------- | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| operation | 12  | duration; sequential / parallel / cross-job incoming-dep counts; scheduled / processing / finished; remaining time; critical-path remaining; job remaining work and op count; ready flag |
+| machine   | 3   | queue length, remaining workload, idle duration                                                                                                                                      |
+
+
+**Edges** (encoder also uses the reverse of each type):
+
+
+| Type                             | Meaning | Edge attr |
+| -------------------------------- | ------- | --------- |
+| `operation —precede→ operation`  | Static instance DAG | type code: sequential=1, parallel=2, cross-job=3 |
+| `operation —compatible→ machine` | Eligibility | efficiency multiplier |
+| `machine —processing→ operation` | Ops currently queued on that machine | efficiency of the assignment |
+| `operation —next→ operation`     | FIFO successor on one machine (see below) | — |
+
+**`next` vs `precede`.** `precede` is the instance DAG and never changes meaning. `next` starts empty and is built as the agent assigns: if machine *m* already has a queue `… → A` and the policy then puts *B* on *m*, the env adds `A —next→ B`. That chain is the disjunctive machine order (who waits behind whom). The encoder also sees the reverse `previous`. Only the **front** of each machine queue may process, and only after its `precede` predecessors have **finished**; later `next` successors sit in the queue. Finished ops drop their `next` / `processing` edges.
+
+
+**Action mask.** Valid actions are unscheduled operations whose **predecessors have all started** (scheduled, processing, or finished — not necessarily finished) **and** an eligible machine. Empty masks fail the episode.
+
+**Discrete ticks.** After each assignment the clock advances by a fixed `time_step`. Only actual processed work is subtracted from remaining durations / machine workload; unused fractional tick capacity is **not** transferred to the next queued operation in the same tick. Terminal `rollout()` uses the same tick routine under a FIFO queue assumption.
+
+**Training reward vs eval $C_{\mathrm{max}}$.** PPO sees a shaped signal: `time_penalty × Δ` of a makespan **lower bound** (clock + max of longest machine workload, remaining critical path, and remaining work / machines). Failures add a large penalty. Evaluation does **not** score the env tick clock. It reconstructs earliest-start $C_{\mathrm{max}}$ from the inferred `(op, machine)` sequence — the same metric as the random, heuristic, and MILP baselines.
+
+---
+
+
+
+## Model
+
+
+| Piece                    | Role                                                                                                                                                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GraphEncoder`           | Projects op/machine features, runs residual `HeteroConv` / `TransformerConv` layers, attention-pools both node types into a graph embedding. Time columns are scaled by per-graph mean duration.              |
+| `EdgePredictor`          | Scores every machine–operation pair (default **bilinear**, optional dot-product). A learned bias uses ECT-style compatibility scores (`-expected_completion / mean_duration`) from the efficiency edge attrs. |
+| Critic                   | MLP on the pooled graph embedding → scalar *V*(*s*).                                                                                                                                                          |
+| `GraphActorCriticPolicy` | SB3 policy: encoder → masked categorical actor + critic. Dropout must be `0.0` so PPO likelihoods stay deterministic.                                                                                         |
+
+
+**Why** `GraphPPO` **exists.** Stock SB3 `PPO.collect_rollouts` calls `obs_as_tensor`, which cannot convert `HeteroData`. `GraphPPO` swaps in a graph-safe conversion and defaults the buffer to `GraphDictRolloutBuffer`, which stores graphs as objects instead of flattening them.
+
+---
+
+
+
+## Baselines
+
+All of these use the **same** successful-episode classic $C_{\mathrm{max}}$ (earliest-start of the assignment sequence). With the same `--seed` and env size, episode *i* is also the **same instance** as in `evaluate.py` (seed `S+i`). The Gym env is only a sequential decoder (ready mask).
+
+
+| Baseline          | What it does                                                                                                                                                                                               |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Random            | Uniform sample among `action_mask` entries (`baseline_random.py`).                                                                                                                                         |
+| Dispatching rules | Named heuristics over the same mask: `SPT`, `LPT`, `MWKR`, `LWKR`, `MOR`, `LOR`, `FIFO`, `MFE`, `LFE`, `SQ`, `LWQM`, `ECT` (`baseline_heuristic.py`). Ties → lowest flat action index.                     |
+| MILP              | Exact PuLP+CBC makespan model on each held-out instance (`baseline_milp.py`). Eligibility, `duration × efficiency` processing times, and the full `precede` DAG. Only **Optimal** solves count as success. |
+
+
+CLI details are in the sections below.
+
+---
+
+
+
 ## Installation
+
+
 
 ### 1. Create an environment
 
@@ -35,6 +162,8 @@ source .venv/bin/activate
 
 pip install --upgrade pip
 ```
+
+
 
 ### 2. Install PyTorch (2.10+)
 
@@ -66,6 +195,8 @@ pip install pyg_lib torch_scatter torch_sparse -f https://data.pyg.org/whl/torch
 pip install pyg_lib torch_scatter torch_sparse -f https://data.pyg.org/whl/torch-2.10.0+cpu.html
 ```
 
+
+
 ### 4. Install remaining dependencies
 
 ```bash
@@ -73,6 +204,8 @@ pip install -r requirements.txt
 # Optional: tests / security audit tooling
 pip install -r requirements-dev.txt
 ```
+
+
 
 ### 5. Verify
 
@@ -82,6 +215,8 @@ python -m pytest -q
 ```
 
 ---
+
+
 
 ## Training
 
@@ -136,28 +271,32 @@ Each `step()` assigns one operation, then advances simulated time by a fixed `ti
 
 ### Default / demo config (`get_debug_train_config()`)
 
-| Hyperparameter      | Value      |
-|---------------------|------------|
-| instance            | 5×3×4      |
-| n_envs              | 2          |
-| hidden_dim          | 64         |
-| critic_hidden_dim   | 128        |
-| num_layers          | 2          |
-| dropout             | 0.0 (required) |
-| n_steps             | 256        |
-| batch_size          | 64         |
-| n_epochs            | 4          |
-| vf_coef             | 0.25       |
-| max_grad_norm       | 2.0        |
-| target_kl           | 0.02       |
-| lr_end_fraction     | 0.5        |
-| ent_coef            | 0.01       |
-| gae_lambda          | 1.0        |
-| total_timesteps     | 65536      |
-| resume              | False      |
-| tensorboard_log     | `./logs`   |
+
+| Hyperparameter    | Value          |
+| ----------------- | -------------- |
+| instance          | 5×3×4          |
+| n_envs            | 2              |
+| hidden_dim        | 64             |
+| critic_hidden_dim | 128            |
+| num_layers        | 2              |
+| dropout           | 0.0 (required) |
+| n_steps           | 256            |
+| batch_size        | 64             |
+| n_epochs          | 4              |
+| vf_coef           | 0.25           |
+| max_grad_norm     | 2.0            |
+| target_kl         | 0.02           |
+| lr_end_fraction   | 0.5            |
+| ent_coef          | 0.01           |
+| gae_lambda        | 1.0            |
+| total_timesteps   | 65536          |
+| resume            | False          |
+| tensorboard_log   | `./logs`       |
+
 
 ---
+
+
 
 ## Evaluation
 
@@ -169,7 +308,7 @@ python evaluate.py --stochastic --trust-checkpoint
 
 Printed metrics:
 
-- **Successful-episode makespan** (± std) — classic FJSP Cmax of the inferred `(op, machine)` sequence (same objective as MILP)
+- **Successful-episode makespan** (± std) — classic FJSP $C_{\mathrm{max}}$ of the inferred `(op, machine)` sequence (same objective as MILP)
 - Episode length (± std)
 - Success rate
 - Success / failure / timeout counts
@@ -177,12 +316,16 @@ Printed metrics:
 
 The Gym env is only a sequential decoder (ready operations + action mask). Evaluation does **not** score the env tick clock.
 
+**Held-out instances.** Episode *i* is generated from seed `S+i` (`n_envs=1`). That stream is identical across `evaluate.py`, `baseline_random.py`, `baseline_heuristic.py`, and `baseline_milp.py` when `--seed` and env size match — same jobs, durations, eligibility, efficiency, and DAG; the assignment sequence can still differ. Episodes in one run are not copies of each other. Training-time eval is a *different* suite by default: `eval_seed = train.seed + 1_000_000` (1 000 042 if `seed=42`). Pass the same `--seed` to compare against a training eval.
+
 Path resolution:
 
 - Explicit `--model-path` never falls back if missing.
 - The default `./checkpoints/best_model.zip` may fall back to sibling `latest_model.zip`.
 
 ---
+
+
 
 ## Random baseline
 
@@ -192,7 +335,7 @@ python baseline_random.py --n-episodes 20 --seed 123
 python baseline_random.py --n-machines 10 --n-jobs 8 --avg-ops 6
 ```
 
-Samples uniformly among valid actions from `action_mask`. Empty masks fail fast. Reports classic instance Cmax of the inferred assignment sequence (same metric schema as `evaluate.py`, no PPO checkpoint).
+Samples uniformly among valid actions from `action_mask`. Empty masks fail fast. Reports classic instance $C_{\mathrm{max}}$ of the inferred assignment sequence (same metric schema as `evaluate.py`, no PPO checkpoint).
 
 ## Heuristic baselines
 
@@ -207,7 +350,7 @@ python baseline_heuristic.py --all --n-episodes 5
 python baseline_heuristic.py --rule ECT --n-machines 10 --n-jobs 8 --avg-ops 6
 ```
 
-Requires in-process `GraphDummyVecEnv` (`n_envs=1`). Same classic-instance Cmax as `evaluate.py` / the random baseline.
+Requires in-process `GraphDummyVecEnv` (`n_envs=1`). Same classic-instance $C_{\mathrm{max}}$ as `evaluate.py` / the random baseline.
 
 ## MILP baseline (exact)
 
@@ -223,6 +366,8 @@ Demo-scale instances are the intended target; larger instances may need `--time-
 
 ---
 
+
+
 ## Rollout baseline
 
 Times `policy.predict` + `env.step` and reports FPS, process RSS, CUDA allocation, and GPU util (nvidia-smi when present). Demo-scale stays the train default; use this before `--full-scale`.
@@ -234,6 +379,8 @@ python benchmark.py --full-scale --n-env-steps 64 --device cuda
 
 ---
 
+
+
 ## TensorBoard
 
 ```bash
@@ -244,22 +391,28 @@ Logged signals include policy/value/entropy losses, learning rate, episode rewar
 
 ---
 
+
+
 ## Checkpointing
 
 Checkpoints are written under `./checkpoints/`:
 
-| File                    | Meaning                                         |
-|-------------------------|-------------------------------------------------|
-| `latest_model.zip`      | Most recent training snapshot                   |
-| `latest_model.zip.meta.json` | Config fingerprint + save metadata         |
-| `best_model.zip`        | Best eval mean makespan                         |
-| `best_score.json`       | Persisted best score (survives resume)          |
+
+| File                         | Meaning                                |
+| ---------------------------- | -------------------------------------- |
+| `latest_model.zip`           | Most recent training snapshot          |
+| `latest_model.zip.meta.json` | Config fingerprint + save metadata     |
+| `best_model.zip`             | Best eval mean makespan                |
+| `best_score.json`            | Persisted best score (survives resume) |
+
 
 - Saves / evals fire on **completed PPO update** boundaries.
 - Final policy is evaluated and saved at training end.
 - Resume is **opt-in** (`--resume --trust-checkpoint`) and rejects fingerprint mismatches.
 
 ---
+
+
 
 ## Project structure
 
@@ -302,6 +455,8 @@ fjsp_ppo/
   tests/
 ```
 
+
+
 ### Design notes
 
 - **Native Gymnasium env:** `envs/fjsp_env.py` implements `FJSPEnv` directly.
@@ -313,7 +468,11 @@ fjsp_ppo/
 
 ---
 
+
+
 ## Troubleshooting
+
+
 
 ### Windows + `SubprocVecEnv`
 
@@ -323,15 +482,21 @@ Always launch via `python train.py` (the `if __name__ == "__main__"` guard is re
 python train.py --dummy-vec --n-envs 2
 ```
 
+
+
 ### CUDA OOM / slow starts
 
 - Keep env tensors on CPU (default in `make_env`); only the policy uses GPU.
 - Lower `--n-envs`, `hidden_dim`, `n_steps`, or `batch_size`.
 
+
+
 ### Resume / trust errors
 
 - Pass `--resume --trust-checkpoint` only for local checkpoints you trust.
 - Fingerprint mismatches mean config drifted; start fresh or restore the matching config.
+
+
 
 ### Empty valid-action mask
 
@@ -339,6 +504,20 @@ Empty masks terminate episodes / fail evaluation. Check gridlock and dependency 
 
 ---
 
-## License / attribution
 
-Scheduling dynamics live in `envs/fjsp_env.py` as a Gymnasium-native FJSP environment for Stable-Baselines3 PPO training.
+
+## Tests
+
+```bash
+python -m pytest -q
+```
+
+CI (`.github/workflows/test.yml`) runs pytest on Python 3.11 and 3.12 for every push and pull request (CPU torch wheel). Dev extras are in `requirements-dev.txt` (`pytest`, `pip-audit`).
+
+---
+
+
+
+## License
+
+[MIT](LICENSE). Scheduling dynamics live in `envs/fjsp_env.py` as a Gymnasium-native FJSP environment for Stable-Baselines3 PPO training.
