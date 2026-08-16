@@ -2,7 +2,9 @@
 
 from training.evaluate import (
     EvalResult,
+    LpEpisodeRecord,
     evaluate_heuristic_fjsp,
+    evaluate_lp_rounding_fjsp,
     evaluate_milp_fjsp,
     evaluate_policy_fjsp,
     evaluate_random_fjsp,
@@ -15,7 +17,9 @@ from training.make_env import make_env_fn, make_vec_env
 __all__ = [
     "EvalResult",
     "GraphDictRolloutBuffer",
+    "LpEpisodeRecord",
     "evaluate_heuristic_fjsp",
+    "evaluate_lp_rounding_fjsp",
     "evaluate_milp_fjsp",
     "evaluate_policy_fjsp",
     "evaluate_random_fjsp",

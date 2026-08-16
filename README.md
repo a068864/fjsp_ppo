@@ -81,30 +81,30 @@ Action encoding: `action = machine_id * n_operations + operation_id`.
 **Node features**
 
 
-| Node      | Dim | Contents                                                                                                                                                                             |
-| --------- | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Node      | Dim | Contents                                                                                                                                                                                 |
+| --------- | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | operation | 12  | duration; sequential / parallel / cross-job incoming-dep counts; scheduled / processing / finished; remaining time; critical-path remaining; job remaining work and op count; ready flag |
-| machine   | 3   | queue length, remaining workload, idle duration                                                                                                                                      |
+| machine   | 3   | queue length, remaining workload, idle duration                                                                                                                                          |
 
 
 **Edges** (encoder also uses the reverse of each type):
 
 
-| Type                             | Meaning | Edge attr |
-| -------------------------------- | ------- | --------- |
-| `operation —precede→ operation`  | Static instance DAG | type code: sequential=1, parallel=2, cross-job=3 |
-| `operation —compatible→ machine` | Eligibility | efficiency multiplier |
-| `machine —processing→ operation` | Ops currently queued on that machine | efficiency of the assignment |
-| `operation —next→ operation`     | FIFO successor on one machine (see below) | — |
+| Type                             | Meaning                                   | Edge attr                                        |
+| -------------------------------- | ----------------------------------------- | ------------------------------------------------ |
+| `operation —precede→ operation`  | Static instance DAG                       | type code: sequential=1, parallel=2, cross-job=3 |
+| `operation —compatible→ machine` | Eligibility                               | efficiency multiplier                            |
+| `machine —processing→ operation` | Ops currently queued on that machine      | efficiency of the assignment                     |
+| `operation —next→ operation`     | FIFO successor on one machine (see below) | —                                                |
 
-**`next` vs `precede`.** `precede` is the instance DAG and never changes meaning. `next` starts empty and is built as the agent assigns: if machine *m* already has a queue `… → A` and the policy then puts *B* on *m*, the env adds `A —next→ B`. That chain is the disjunctive machine order (who waits behind whom). The encoder also sees the reverse `previous`. Only the **front** of each machine queue may process, and only after its `precede` predecessors have **finished**; later `next` successors sit in the queue. Finished ops drop their `next` / `processing` edges.
 
+`next` vs `precede`. `precede` is the instance DAG and never changes meaning. `next` starts empty and is built as the agent assigns: if machine *m* already has a queue `… → A` and the policy then puts *B* on *m*, the env adds `A —next→ B`. That chain is the disjunctive machine order (who waits behind whom). The encoder also sees the reverse `previous`. Only the **front** of each machine queue may process, and only after its `precede` predecessors have **finished**; later `next` successors sit in the queue. Finished ops drop their `next` / `processing` edges.
 
 **Action mask.** Valid actions are unscheduled operations whose **predecessors have all started** (scheduled, processing, or finished — not necessarily finished) **and** an eligible machine. Empty masks fail the episode.
 
 **Discrete ticks.** After each assignment the clock advances by a fixed `time_step`. Only actual processed work is subtracted from remaining durations / machine workload; unused fractional tick capacity is **not** transferred to the next queued operation in the same tick. Terminal `rollout()` uses the same tick routine under a FIFO queue assumption.
 
-**Training reward vs eval $C_{\mathrm{max}}$.** PPO sees a shaped signal: `time_penalty × Δ` of a makespan **lower bound** (clock + max of longest machine workload, remaining critical path, and remaining work / machines). Failures add a large penalty. Evaluation does **not** score the env tick clock. It reconstructs earliest-start $C_{\mathrm{max}}$ from the inferred `(op, machine)` sequence — the same metric as the random, heuristic, and MILP baselines.
+**Training reward vs eval $C_{\mathrm{max}}$.** PPO sees a shaped signal: `time_penalty × Δ` of a makespan **lower bound** (clock + max of longest machine workload, remaining critical path, and remaining work / machines). Failures add a large penalty. Evaluation does **not** score the env tick clock. It reconstructs earliest-start $C_{\mathrm{max}}$ from the inferred `(op, machine)` sequence — the same metric as the random, heuristic, MILP, and LP-rounding baselines.
 
 ---
 
@@ -129,7 +129,7 @@ Action encoding: `action = machine_id * n_operations + operation_id`.
 
 ## Baselines
 
-All of these use the **same** successful-episode classic $C_{\mathrm{max}}$ (earliest-start of the assignment sequence). With the same `--seed` and env size, episode *i* is also the **same instance** as in `evaluate.py` (seed `S+i`). The Gym env is only a sequential decoder (ready mask).
+All of these report the **same** successful-episode classic $C_{\mathrm{max}}$ (earliest-start feasible schedule). With the same `--seed` and env size, episode *i* is also the **same instance** as in `evaluate.py` (seed `S+i`). The Gym env is only a sequential decoder (ready mask).
 
 
 | Baseline          | What it does                                                                                                                                                                                               |
@@ -137,6 +137,7 @@ All of these use the **same** successful-episode classic $C_{\mathrm{max}}$ (ear
 | Random            | Uniform sample among `action_mask` entries (`baseline_random.py`).                                                                                                                                         |
 | Dispatching rules | Named heuristics over the same mask: `SPT`, `LPT`, `MWKR`, `LWKR`, `MOR`, `LOR`, `FIFO`, `MFE`, `LFE`, `SQ`, `LWQM`, `ECT` (`baseline_heuristic.py`). Ties → lowest flat action index.                     |
 | MILP              | Exact PuLP+CBC makespan model on each held-out instance (`baseline_milp.py`). Eligibility, `duration × efficiency` processing times, and the full `precede` DAG. Only **Optimal** solves count as success. |
+| LP-rounding       | Assignment LP + rounding + LRPT/CP insertion list scheduling (`baseline_lp.py`).                                                                                                                           |
 
 
 CLI details are in the sections below.
@@ -269,31 +270,6 @@ All hyperparameters live in `config.py` (`TrainConfig`, `EnvConfig`, `ModelConfi
 
 Each `step()` assigns one operation, then advances simulated time by a fixed `time_step`. Only actual processed work is subtracted from remaining durations / machine workload; unused fractional tick capacity is **not** transferred to the next queued operation in the same tick. Terminal `rollout()` uses the same tick routine.
 
-### Default / demo config (`get_debug_train_config()`)
-
-
-| Hyperparameter    | Value          |
-| ----------------- | -------------- |
-| instance          | 5×3×4          |
-| n_envs            | 2              |
-| hidden_dim        | 64             |
-| critic_hidden_dim | 128            |
-| num_layers        | 2              |
-| dropout           | 0.0 (required) |
-| n_steps           | 256            |
-| batch_size        | 64             |
-| n_epochs          | 4              |
-| vf_coef           | 0.25           |
-| max_grad_norm     | 2.0            |
-| target_kl         | 0.02           |
-| lr_end_fraction   | 0.5            |
-| ent_coef          | 0.01           |
-| gae_lambda        | 1.0            |
-| total_timesteps   | 65536          |
-| resume            | False          |
-| tensorboard_log   | `./logs`       |
-
-
 ---
 
 
@@ -308,7 +284,7 @@ python evaluate.py --stochastic --trust-checkpoint
 
 Printed metrics:
 
-- **Successful-episode makespan** (± std) — classic FJSP $C_{\mathrm{max}}$ of the inferred `(op, machine)` sequence (same objective as MILP)
+- **Successful-episode makespan** (± std) — classic FJSP $C_{\mathrm{max}}$ of the inferred `(op, machine)` sequence (same objective as MILP / LP-rounding) 
 - Episode length (± std)
 - Success rate
 - Success / failure / timeout counts
@@ -316,7 +292,7 @@ Printed metrics:
 
 The Gym env is only a sequential decoder (ready operations + action mask). Evaluation does **not** score the env tick clock.
 
-**Held-out instances.** Episode *i* is generated from seed `S+i` (`n_envs=1`). That stream is identical across `evaluate.py`, `baseline_random.py`, `baseline_heuristic.py`, and `baseline_milp.py` when `--seed` and env size match — same jobs, durations, eligibility, efficiency, and DAG; the assignment sequence can still differ. Episodes in one run are not copies of each other. Training-time eval is a *different* suite by default: `eval_seed = train.seed + 1_000_000` (1 000 042 if `seed=42`). Pass the same `--seed` to compare against a training eval.
+**Held-out instances.** Episode *i* is generated from seed `S+i` (`n_envs=1`). That stream is identical across `evaluate.py`, `baseline_random.py`, `baseline_heuristic.py`, `baseline_milp.py`, `baseline_lp.py`, and `compare_baselines.py` when `--seed` and env size match — same jobs, durations, eligibility, efficiency, and DAG; the assignment sequence can still differ. Episodes in one run are not copies of each other. Training-time eval is a *different* suite by default: `eval_seed = train.seed + 1_000_000` (1 000 042 if `seed=42`). Pass the same `--seed` to compare against a training eval.
 
 Path resolution:
 
@@ -363,6 +339,48 @@ python baseline_milp.py --time-limit 30 --n-machines 5 --n-jobs 3 --avg-ops 4
 ```
 
 Demo-scale instances are the intended target; larger instances may need `--time-limit` and may not prove optimality.
+
+## LP-rounding baseline (relaxation + heuristic)
+
+Offline assignment LP + rounding + insertion list scheduling on each held-out instance (`eval_seed + episode_index`). Same eligibility, `duration × efficiency` processing times, and `precede` DAG as the MILP. This is **not** a proven approximation algorithm.
+
+**LP relaxation** (PuLP+CBC, continuous). Minimize `Cmax` with:
+
+- `x[i,m] ∈ [0,1]` on eligible machines, `Σ_m x[i,m] = 1`
+- start times `S[i] ≥ 0` and job-DAG precedence `S[j] ≥ S[i] + Σ_m p[i,m] x[i,m]`
+- `Cmax ≥ S[i] + Σ_m p[i,m] x[i,m]`
+- machine-load inequalities `Σ_i p[i,m] x[i,m] ≤ Cmax`
+
+Integer assignment `x ∈ {0,1}` is relaxed to `[0,1]`. Exact disjunctive sequencing (the MILP's binary `y` / big-M pairs) is **not** LP-relaxed in place — those big-M constraints are nearly vacuous when `y` is continuous. The load inequalities are valid: every feasible integral schedule satisfies them, so `LB_LP ≤ OPT` up to solver tolerance. The bound can be strict.
+
+**Rounding.** Trial 0 is largest-fraction (`argmax_m x[i,m]`, ties → lowest machine). Extra `--rounding-trials` draw machines from `x[i,·]` with `--seed`. The LP is solved once; only rounding/list scheduling repeats.
+
+**List scheduling.** Each integral assignment is decoded with insertion list scheduling (ready ops only; earliest feasible gap on the assigned machine, not append-only). Reconstruction tries `LRPT` and `CP` and keeps the lowest classic $C_{\mathrm{max}}$ — the same earliest-start objective as MILP / eval.
+
+`baseline_lp.py` prints per-instance `LB_LP`, feasible $C_{\mathrm{max}}$, and the empirical ratio $C_{\mathrm{max}} / LB_{\mathrm{LP}}$ (not a proven approximation factor). The sandwich is `LB_LP ≤ OPT ≤ C_max`. `compare_baselines.py` reports only the same columns as the other methods (makespan, std, success, episode length, ms/ep).
+
+CBC is used as an LP solver. Same instance + seed + trials + PuLP/CBC version is deterministic given fixed variable order; alternative optimal bases can still yield different fractional `x` with the same `LB_LP`.
+
+```bash
+python baseline_lp.py
+python baseline_lp.py --n-episodes 5 --seed 42 --rounding-trials 20
+python baseline_lp.py --compare-milp --n-episodes 5 --verbose
+python baseline_lp.py --time-limit 30 --n-machines 5 --n-jobs 3 --avg-ops 4
+```
+
+`--compare-milp` runs the existing exact solver **once per instance** (not per rounding trial) and prints `OPT`, `(OPT - LB_LP)/OPT`, and `(C_max - OPT)/OPT` when CBC proves optimality.
+
+## PPO vs all baselines
+
+Same held-out stream (`--seed`, env size) for PPO, random, every dispatching rule, MILP, and LP-rounding. The table uses the same columns for every method. LP reconstruction is listed as `LP-LRPT` and `LP-CP` (both always shown). LP bound / ratio columns are only in `baseline_lp.py`.
+
+```bash
+python compare_baselines.py --trust-checkpoint
+python compare_baselines.py --trust-checkpoint --seed 1000042 --n-episodes 20
+python compare_baselines.py --trust-checkpoint --rounding-trials 20 --time-limit 30
+```
+
+`--seed 1000042` matches this repo's demo checkpoint (`train.seed=123`, `eval_seed = seed + 1_000_000`). `ms/ep` is mean wall time per instance (constructive methods: step latency × episode length; MILP/LP: solver time).
 
 ---
 
@@ -423,6 +441,8 @@ fjsp_ppo/
   baseline_random.py       # Uniform random valid-action baseline
   baseline_heuristic.py    # Classic dispatching-rule baselines
   baseline_milp.py         # Exact makespan MILP (PuLP+CBC)
+  baseline_lp.py           # LP relaxation + rounding/list-scheduling baseline
+  compare_baselines.py     # PPO vs random / heuristic / MILP / LP-rounding
   benchmark.py             # FPS / RSS / GPU baseline
   config.py                # All hyperparameters + validation
   callbacks.py             # Checkpoint / eval / TB / LR callbacks
@@ -435,6 +455,8 @@ fjsp_ppo/
     dispatch_rules.py      # SPT/LPT/MWKR/... action selection
   solvers/
     milp.py                # FJSP instance extract + MILP solve
+    lp_rounding.py         # Assignment LP + rounding
+    list_scheduler.py      # LRPT/CP insertion list scheduling
   envs/
     fjsp_env.py            # Gymnasium-native FJSP environment
   models/

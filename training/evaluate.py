@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -11,6 +11,7 @@ from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.vec_env import VecEnv
 
 from heuristics.dispatch_rules import select_heuristic_action
+from solvers.lp_rounding import LpRoundingResult, solve_lp_rounding
 from solvers.milp import (
     decode_assignment_schedule,
     extract_fjsp_instance,
@@ -353,6 +354,160 @@ def evaluate_milp_fjsp(
     return result
 
 
+@dataclass
+class LpEpisodeRecord:
+    """Per-instance LP-rounding metrics for the eval suite."""
+
+    episode: int
+    seed: int
+    lp_lower_bound: float
+    makespan: float
+    lp_ratio: float
+    runtime_s: float
+    rounding_trials: int
+    best_rule: str
+    n_fractional: int
+    lp_status: str
+    max_constraint_violation: float = float("inf")
+    assignment_sum_violation: float = float("inf")
+    opt: Optional[float] = None
+    lp_to_opt_gap: Optional[float] = None
+    sol_to_opt_gap: Optional[float] = None
+    rule_makespans: Dict[str, float] = field(default_factory=dict)
+
+
+def _lp_episode_metrics(instance, result: LpRoundingResult) -> dict:
+    if result.status == "Feasible" and np.isfinite(result.makespan):
+        return {
+            "l": float(instance.n_operations),
+            "makespan": float(result.makespan),
+            "success": True,
+            "truncated": False,
+        }
+    return {
+        "l": float(instance.n_operations),
+        "makespan": float("inf"),
+        "success": False,
+        "truncated": result.lp_status != "Optimal",
+    }
+
+
+def _gap(numer: float, denom: float) -> Optional[float]:
+    if not (np.isfinite(numer) and np.isfinite(denom)) or abs(denom) <= 1e-12:
+        return None
+    return float(numer / denom)
+
+
+def evaluate_lp_rounding_fjsp(
+    env: VecEnv,
+    n_episodes: int = 20,
+    seed: int = 42,
+    *,
+    rounding_trials: int = 20,
+    time_limit: Optional[float] = None,
+    compare_milp: bool = False,
+    milp_time_limit: Optional[float] = None,
+) -> Tuple[EvalResult, List[LpEpisodeRecord]]:
+    """Solve each held-out instance with LP relaxation + rounding/list scheduling.
+
+    Episode ``i`` uses seed ``seed + i`` (same instance stream as the other
+    baselines). The LP is solved once per instance; rounding trials then
+    list-schedule candidate assignments. Optional ``compare_milp`` runs the
+    existing exact solver once per instance for gap reporting.
+    """
+    if n_episodes <= 0:
+        raise ValueError(f"n_episodes must be positive, got {n_episodes}")
+    if rounding_trials < 1:
+        raise ValueError(f"rounding_trials must be >= 1, got {rounding_trials}")
+    _require_dummy_vec(env, "LP-rounding evaluation")
+    if env.num_envs != 1:
+        raise ValueError(f"LP-rounding evaluation requires n_envs=1, got {env.num_envs}")
+
+    episode_lengths: List[float] = []
+    episode_makespans: List[float] = []
+    episode_successes: List[float] = []
+    episode_timeouts: List[float] = []
+    inference_times: List[float] = []
+    records: List[LpEpisodeRecord] = []
+
+    logger.info(
+        "Starting LP-rounding evaluation: n_episodes=%d seed=%d trials=%d "
+        "time_limit=%s compare_milp=%s",
+        n_episodes,
+        seed,
+        rounding_trials,
+        time_limit,
+        compare_milp,
+    )
+
+    for ep_idx in range(n_episodes):
+        ep_seed = int(seed) + int(ep_idx)
+        env.seed(ep_seed)
+        env.reset()
+        fjsp = env.envs[0].unwrapped
+        instance = extract_fjsp_instance(fjsp)
+
+        start = time.perf_counter()
+        lp_res = solve_lp_rounding(
+            instance,
+            seed=ep_seed,
+            rounding_trials=int(rounding_trials),
+            time_limit=time_limit,
+        )
+        runtime_s = time.perf_counter() - start
+        inference_times.append(runtime_s)
+
+        ep = _lp_episode_metrics(instance, lp_res)
+        episode_lengths.append(float(ep["l"]))
+        episode_makespans.append(float(ep["makespan"]))
+        episode_successes.append(1.0 if ep["success"] else 0.0)
+        episode_timeouts.append(1.0 if ep.get("truncated") else 0.0)
+
+        opt: Optional[float] = None
+        lp_to_opt: Optional[float] = None
+        sol_to_opt: Optional[float] = None
+        if compare_milp:
+            milp = solve_makespan(
+                instance,
+                time_limit=milp_time_limit if milp_time_limit is not None else time_limit,
+            )
+            if milp.status == "Optimal" and np.isfinite(milp.makespan):
+                opt = float(milp.makespan)
+                lp_to_opt = _gap(opt - float(lp_res.lp_lower_bound), opt)
+                sol_to_opt = _gap(float(lp_res.makespan) - opt, opt)
+
+        records.append(
+            LpEpisodeRecord(
+                episode=int(ep_idx),
+                seed=ep_seed,
+                lp_lower_bound=float(lp_res.lp_lower_bound),
+                makespan=float(lp_res.makespan),
+                lp_ratio=float(lp_res.lp_ratio),
+                runtime_s=float(runtime_s),
+                rounding_trials=int(rounding_trials),
+                best_rule=str(lp_res.best_rule or ""),
+                n_fractional=int(lp_res.n_fractional),
+                lp_status=str(lp_res.lp_status),
+                max_constraint_violation=float(lp_res.max_constraint_violation),
+                assignment_sum_violation=float(lp_res.assignment_sum_violation),
+                opt=opt,
+                lp_to_opt_gap=lp_to_opt,
+                sol_to_opt_gap=sol_to_opt,
+                rule_makespans=dict(lp_res.rule_makespans),
+            )
+        )
+
+    result = _aggregate_eval(
+        episode_lengths,
+        episode_makespans,
+        episode_successes,
+        episode_timeouts,
+        inference_times,
+    )
+    logger.info("LP-rounding evaluation finished:\n%s", result.format_summary())
+    return result, records
+
+
 def print_eval_result(result: EvalResult, title: str = "FJSP PPO Evaluation Results") -> None:
     """Print evaluation metrics to stdout."""
     print("=" * 60)
@@ -427,7 +582,9 @@ def _aggregate_eval(
 
 __all__ = [
     "EvalResult",
+    "LpEpisodeRecord",
     "evaluate_heuristic_fjsp",
+    "evaluate_lp_rounding_fjsp",
     "evaluate_milp_fjsp",
     "evaluate_policy_fjsp",
     "evaluate_random_fjsp",
