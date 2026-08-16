@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Optional
 
 from callbacks import build_callbacks, make_lr_schedule
-from config import TrainConfig, get_debug_train_config, get_full_scale_train_config
+from config import (
+    EVAL_SEED_OFFSET,
+    TrainConfig,
+    get_debug_train_config,
+    get_full_scale_train_config,
+)
 from models.graph_ppo import GraphPPO, load_graph_ppo
 from models.sb3_policy import GraphActorCriticPolicy, make_policy_kwargs
 from training.graph_buffer import GraphDictRolloutBuffer
@@ -72,7 +77,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--full-scale",
         action="store_true",
-        help="Use FULL_SCALE_ENV (25x15x8) and large model/PPO sizes",
+        help="Use FULL_SCALE_ENV (25x15x8), 2**21 steps, ./checkpoints_full",
     )
     parser.add_argument(
         "--debug",
@@ -86,6 +91,7 @@ def apply_args(cfg: TrainConfig, args: argparse.Namespace) -> TrainConfig:
     """Apply CLI overrides onto a config instance and revalidate."""
     if args.seed is not None:
         cfg.seed = int(args.seed)
+        cfg.eval_seed = int(args.seed) + EVAL_SEED_OFFSET
     if args.n_envs is not None:
         cfg.n_envs = int(args.n_envs)
     if args.total_timesteps is not None:

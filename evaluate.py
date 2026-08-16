@@ -80,9 +80,8 @@ def apply_args(cfg: EvalConfig, args: argparse.Namespace) -> EvalConfig:
 def resolve_model_path(cfg: EvalConfig, *, explicit: bool = False) -> Path:
     """Resolve the checkpoint path.
 
-    Explicit CLI paths never fall back. The default configured path may fall
-    back to a sibling ``latest_model.zip`` when the default best checkpoint is
-    missing.
+    Explicit CLI paths never fall back. A configured ``best_model.zip`` may fall
+    back to a sibling ``latest_model.zip`` in the same directory.
     """
     path = Path(cfg.model_path)
     if checkpoint_exists(path):
@@ -90,24 +89,17 @@ def resolve_model_path(cfg: EvalConfig, *, explicit: bool = False) -> Path:
     if explicit:
         raise FileNotFoundError(f"No checkpoint found at explicit path {path}.")
 
-    default_best = Path("./checkpoints/best_model.zip")
-    if path.resolve() != default_best.resolve() and str(path) != str(default_best):
-        # Non-default configured path: do not silently substitute another zip.
-        raise FileNotFoundError(
-            f"No checkpoint found at {path}. Train a model first with train.py."
-        )
-
-    latest = Path("./checkpoints/latest_model.zip")
-    if checkpoint_exists(latest):
+    latest = path.with_name("latest_model.zip")
+    if path.name == "best_model.zip" and checkpoint_exists(latest):
         logger.warning(
-            "Model %s not found; falling back to default sibling %s",
+            "Model %s not found; falling back to sibling %s",
             path,
             latest,
         )
         return latest
 
     raise FileNotFoundError(
-        f"No checkpoint found at {path} or {latest}. Train a model first with train.py."
+        f"No checkpoint found at {path}. Train a model first with train.py."
     )
 
 

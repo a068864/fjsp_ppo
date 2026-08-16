@@ -31,7 +31,7 @@ def add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--full-scale",
         action="store_true",
-        help="Use FULL_SCALE_ENV (25x15x8) and matching model dims",
+        help="Use FULL_SCALE_ENV (25x15x8), matching model, ./checkpoints_full",
     )
 
 
@@ -48,6 +48,8 @@ def apply_shared_eval_args(cfg: EvalConfig, args: argparse.Namespace) -> EvalCon
         full = get_full_scale_eval_config()
         cfg.env = replace(full.env)
         cfg.model = replace(full.model)
+        cfg.seed = int(full.seed)
+        cfg.model_path = str(full.model_path)
     if getattr(args, "n_episodes", None) is not None:
         cfg.n_episodes = int(args.n_episodes)
     if getattr(args, "seed", None) is not None:

@@ -161,3 +161,17 @@ def test_explicit_missing_eval_path_does_not_fallback(tmp_path: Path):
     cfg.model_path = str(tmp_path / "missing_explicit.zip")
     with pytest.raises(FileNotFoundError, match="missing_explicit"):
         resolve_model_path(cfg, explicit=True)
+
+
+def test_configured_best_model_falls_back_to_sibling_latest(tmp_path: Path, monkeypatch):
+    from evaluate import resolve_model_path
+    from config import get_full_scale_eval_config
+
+    ckpt_dir = tmp_path / "checkpoints_full"
+    ckpt_dir.mkdir()
+    latest = ckpt_dir / "latest_model.zip"
+    latest.write_bytes(b"zip")
+    monkeypatch.setattr("evaluate.checkpoint_exists", lambda path: Path(path) == latest)
+    cfg = get_full_scale_eval_config()
+    cfg.model_path = str(ckpt_dir / "best_model.zip")
+    assert resolve_model_path(cfg, explicit=False) == latest

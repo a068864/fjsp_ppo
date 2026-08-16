@@ -37,6 +37,8 @@ def test_apply_shared_eval_args_full_scale_upgrades_demo_config():
     assert cfg.env.avg_operations_per_job == full.env.avg_operations_per_job
     assert cfg.model.hidden_dim == full.model.hidden_dim
     assert cfg.model.num_layers == full.model.num_layers
+    assert cfg.seed == full.seed
+    assert cfg.model_path == full.model_path
 
 
 def test_apply_shared_eval_args_full_scale_then_size_overrides():
@@ -50,7 +52,10 @@ def test_apply_shared_eval_args_full_scale_then_size_overrides():
 def test_eval_config_from_args_full_scale():
     assert eval_config_from_args(None).env.n_machines == 5
     assert eval_config_from_args(Namespace(full_scale=False)).env.n_machines == 5
-    assert eval_config_from_args(Namespace(full_scale=True)).env.n_machines == 25
+    full = eval_config_from_args(Namespace(full_scale=True))
+    assert full.env.n_machines == 25
+    assert full.seed == 1_000_042
+    assert full.model_path == "./checkpoints_full/best_model.zip"
 
 
 def test_heuristic_milp_and_lp_cli_full_scale_upgrades_demo_config():

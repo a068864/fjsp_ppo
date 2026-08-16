@@ -377,11 +377,16 @@ def get_debug_train_config() -> TrainConfig:
 
 
 def get_full_scale_train_config() -> TrainConfig:
-    """Serious-run config: 25×15×8 instance, default model sizes, n_steps=512."""
+    """Serious-run config: 25×15×8, 2**21 steps, eval every 8 updates."""
     return TrainConfig(
         n_envs=8,
+        n_eval_episodes=20,
+        checkpoint_freq_updates=8,
+        eval_freq_updates=8,
+        checkpoint_dir="./checkpoints_full",
+        tensorboard_log="./logs_full",
         env=replace(FULL_SCALE_ENV),
-        ppo=PPOConfig(n_steps=512),
+        ppo=PPOConfig(n_steps=512, total_timesteps=2_097_152),
     )
 
 
@@ -392,4 +397,11 @@ def get_default_eval_config() -> EvalConfig:
 
 def get_full_scale_eval_config() -> EvalConfig:
     """Evaluation config matching ``get_full_scale_train_config()``."""
-    return _eval_from_train(get_full_scale_train_config())
+    train = get_full_scale_train_config()
+    return EvalConfig(
+        seed=int(train.eval_seed),
+        n_episodes=20,
+        model_path=f"{train.checkpoint_dir}/{train.best_model_name}",
+        env=replace(train.env),
+        model=replace(train.model),
+    )

@@ -11,7 +11,7 @@ The environment state is a PyTorch Geometric `HeteroData` graph. A custom SB3 po
 
 **Supported Python:** 3.10–3.13.
 
-Default training/eval is **demo-scale** (`DEBUG_SCALE_ENV`: `5` machines × `3` jobs × `4` avg ops, short PPO run) so training can be verified quickly. For a serious run, pass `--full-scale` (`FULL_SCALE_ENV` `25×15×8` plus large model/PPO sizes). Measure FPS / RSS / GPU first:
+Default training/eval is **demo-scale** (`DEBUG_SCALE_ENV`: `5` machines × `3` jobs × `4` avg ops, short PPO run) so training can be verified quickly. For a serious run, pass `--full-scale` (`FULL_SCALE_ENV` `25×15×8`, 2 097 152 steps, artifacts under `./checkpoints_full`). Measure FPS / RSS / GPU first:
 
 ```bash
 python benchmark.py
@@ -227,7 +227,7 @@ From the project root (`fjsp_ppo/`):
 python train.py
 ```
 
-Training **starts fresh by default** (`resume=False`) on the **demo-scale** instance (`5×3×4`, 65k steps). Pass `--full-scale` for `25×15×8` + 1M steps.
+Training **starts fresh by default** (`resume=False`) on the **demo-scale** instance (`5×3×4`, 65k steps). Pass `--full-scale` for `25×15×8` + 2 097 152 steps (writes `./checkpoints_full`, not the demo zips).
 
 To continue from a trusted local checkpoint:
 
@@ -256,7 +256,7 @@ python train.py --device mps --seed 123
 # Larger instance
 python train.py --n-machines 10 --n-jobs 8 --avg-ops 6
 
-# Full-scale instance (25×15×8) + large model/PPO sizes
+# Full-scale instance (25×15×8, 2**21 steps, ./checkpoints_full)
 python train.py --full-scale
 python evaluate.py --full-scale --trust-checkpoint
 python baseline_random.py --full-scale
@@ -264,7 +264,7 @@ python baseline_random.py --full-scale
 
 All hyperparameters live in `config.py` (`TrainConfig`, `EnvConfig`, `ModelConfig`, `PPOConfig`).
 
-**Checkpoint compatibility:** Older `latest_model.zip` / `best_model.zip` files are incompatible when env size, model dims, or PPO batching change. Resume also requires a matching `.meta.json` fingerprint. After upgrading, start fresh or delete stale zips under `./checkpoints/`.
+**Checkpoint compatibility:** Older `latest_model.zip` / `best_model.zip` files are incompatible when env size, model dims, or PPO batching change. Resume also requires a matching `.meta.json` fingerprint. `--full-scale` writes `./checkpoints_full/` so demo zips under `./checkpoints/` are left alone.
 
 ### Discrete tick semantics
 
@@ -292,12 +292,12 @@ Printed metrics:
 
 The Gym env is only a sequential decoder (ready operations + action mask). Evaluation does **not** score the env tick clock.
 
-**Held-out instances.** Episode *i* is generated from seed `S+i` (`n_envs=1`). That stream is identical across `evaluate.py`, `baseline_random.py`, `baseline_heuristic.py`, `baseline_milp.py`, `baseline_lp.py`, and `compare_baselines.py` when `--seed` and env size match — same jobs, durations, eligibility, efficiency, and DAG; the assignment sequence can still differ. Episodes in one run are not copies of each other. Training-time eval is a *different* suite by default: `eval_seed = train.seed + 1_000_000` (1 000 042 if `seed=42`). Pass the same `--seed` to compare against a training eval.
+**Held-out instances.** Episode *i* is generated from seed `S+i` (`n_envs=1`). That stream is identical across `evaluate.py`, `baseline_random.py`, `baseline_heuristic.py`, `baseline_milp.py`, `baseline_lp.py`, and `compare_baselines.py` when `--seed` and env size match — same jobs, durations, eligibility, efficiency, and DAG; the assignment sequence can still differ. Episodes in one run are not copies of each other. Training-time eval uses `eval_seed = train.seed + 1_000_000` (1 000 042 if `seed=42`). `evaluate.py --full-scale` defaults to that held-out seed. Demo eval still defaults to seed 42; pass `--seed 1000042` to match a demo training eval.
 
 Path resolution:
 
 - Explicit `--model-path` never falls back if missing.
-- The default `./checkpoints/best_model.zip` may fall back to sibling `latest_model.zip`.
+- The configured `best_model.zip` may fall back to a sibling `latest_model.zip` in the same directory (`./checkpoints/` for demo, `./checkpoints_full/` for `--full-scale`).
 
 ---
 
@@ -413,7 +413,7 @@ Logged signals include policy/value/entropy losses, learning rate, episode rewar
 
 ## Checkpointing
 
-Checkpoints are written under `./checkpoints/`:
+Checkpoints are written under `./checkpoints/` (demo) or `./checkpoints_full/` (`--full-scale`):
 
 
 | File                         | Meaning                                |

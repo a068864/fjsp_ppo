@@ -1,4 +1,5 @@
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 
@@ -85,16 +86,48 @@ def test_full_scale_train_config_geometry_and_batching():
     assert cfg.env.avg_operations_per_job == 8
     assert cfg.model.hidden_dim == 128
     assert cfg.model.num_heads == 4
+    assert cfg.n_envs == 8
+    assert cfg.n_eval_episodes == 20
+    assert cfg.eval_freq_updates == 8
+    assert cfg.checkpoint_freq_updates == 8
+    assert cfg.ppo.n_steps == 512
+    assert cfg.ppo.total_timesteps == 2_097_152
+    assert cfg.ppo.total_timesteps & (cfg.ppo.total_timesteps - 1) == 0
+    assert cfg.checkpoint_dir == "./checkpoints_full"
+    assert cfg.tensorboard_log == "./logs_full"
+    assert cfg.eval_seed == cfg.seed + 1_000_000
     assert (cfg.ppo.n_steps * cfg.n_envs) % cfg.ppo.batch_size == 0
     eval_cfg = get_full_scale_eval_config()
     eval_cfg.validate()
     assert eval_cfg.env.n_machines == 25
     assert eval_cfg.model.hidden_dim == cfg.model.hidden_dim
+    assert eval_cfg.seed == cfg.eval_seed
+    assert eval_cfg.n_episodes == 20
+    assert Path(eval_cfg.model_path) == Path(cfg.checkpoint_dir) / cfg.best_model_name
 
 
 def test_train_config_rejects_partial_ppo_minibatch():
     with pytest.raises(ValueError, match="n_steps\\*n_envs"):
         TrainConfig(n_envs=3, ppo=PPOConfig(n_steps=5, batch_size=4))
+
+
+def test_train_cli_seed_keeps_held_out_eval_offset():
+    args = Namespace(
+        seed=123,
+        n_envs=None,
+        total_timesteps=None,
+        device=None,
+        resume=False,
+        no_resume=False,
+        trust_checkpoint=False,
+        dummy_vec=False,
+        n_machines=None,
+        n_jobs=None,
+        avg_operations_per_job=None,
+    )
+    cfg = apply_args(get_full_scale_train_config(), args)
+    assert cfg.seed == 123
+    assert cfg.eval_seed == 1_000_123
 
 
 def test_train_cli_revalidates_after_mutation():
