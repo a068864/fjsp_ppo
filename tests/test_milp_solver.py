@@ -256,3 +256,30 @@ def test_policy_eval_scores_classic_instance_cmax():
     assert policy.success_rate == pytest.approx(1.0)
     assert np.isfinite(policy.mean_makespan)
     assert policy.mean_makespan + 1e-4 >= milp.mean_makespan
+
+
+def test_policy_eval_uses_env_logged_cmax_without_decode(monkeypatch):
+    """Eval reads classic Cmax from episode info; it must not replay assignments."""
+
+    def _no_eval_replay(*_args, **_kwargs):
+        raise AssertionError("evaluate must not call decode_assignment_schedule")
+
+    monkeypatch.setattr("solvers.milp.decode_assignment_schedule", _no_eval_replay)
+
+    import training.evaluate as evaluate_mod
+
+    assert not hasattr(evaluate_mod, "decode_assignment_schedule")
+
+    cfg = _tiny_eval_cfg(seed=11, n_episodes=2)
+    train_cfg = build_eval_train_config(cfg)
+    env = make_vec_env(train_cfg, n_envs=1, use_subprocess=False, for_eval=True)
+    try:
+        env.seed(cfg.seed)
+        policy = evaluate_policy_fjsp(
+            _FirstValidPolicy(), env, n_episodes=cfg.n_episodes, deterministic=True
+        )
+    finally:
+        env.close()
+    assert policy.success_rate == pytest.approx(1.0)
+    assert np.isfinite(policy.mean_makespan)
+    assert policy.n_episodes == 2

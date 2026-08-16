@@ -125,12 +125,19 @@ def test_reset_estimated_completion_uses_critical_path():
     env.close()
 
 
-def test_successful_episode_logs_classic_makespan_not_clock():
+def test_successful_episode_logs_classic_makespan_not_clock(monkeypatch):
     """Logged makespan is earliest-start Cmax; the PPO reward stays the bound delta."""
-    from solvers.milp import decode_assignment_schedule
+    from solvers.milp import decode_assignment_schedule as decode_oracle
+    from solvers.milp import extract_fjsp_instance
+
+    def _no_end_replay(*_args, **_kwargs):
+        raise AssertionError("do not replay the assignment list to log Cmax")
+
+    monkeypatch.setattr("solvers.milp.decode_assignment_schedule", _no_end_replay)
 
     env = FJSPEnv(n_machines=3, n_jobs=2, avg_operations_per_job=2, seed=0, device="cpu")
     obs, _ = env.reset(seed=0)
+    instance = extract_fjsp_instance(env)
     before = env.estimated_completion()
     action = int(np.flatnonzero(obs["action_mask"])[0])
     obs, first_reward, terminated, truncated, _info = env.step(action)
@@ -152,7 +159,51 @@ def test_successful_episode_logs_classic_makespan_not_clock():
     if not info.get("success"):
         env.close()
         pytest.skip("episode did not succeed")
-    decoded = decode_assignment_schedule(env._schedule_instance, env._assignment_order)
+    decoded = decode_oracle(instance, env._assignment_order)
+    assert info["makespan"] == pytest.approx(decoded.makespan)
+    assert decoded.makespan <= env.current_time + 1e-6
+    env.close()
+
+
+def test_logged_makespan_is_running_classic_cmax(monkeypatch):
+    """Two independent ops: Cmax is 2, maintained during assign, not a final replay."""
+    from solvers.milp import decode_assignment_schedule as decode_oracle
+    from solvers.milp import extract_fjsp_instance
+
+    def _no_end_replay(*_args, **_kwargs):
+        raise AssertionError("do not replay the assignment list to log Cmax")
+
+    monkeypatch.setattr("solvers.milp.decode_assignment_schedule", _no_end_replay)
+
+    env = FJSPEnv(
+        n_machines=2,
+        n_jobs=1,
+        avg_operations_per_job=2,
+        seed=0,
+        device="cpu",
+    )
+    env.reset(seed=0)
+    env.eligibility_matrix[:, :] = True
+    env.efficiency_modifiers[:, :] = 1.0
+    env.state["operation", "precede", "operation"].edge_index = torch.empty(
+        (2, 0), dtype=torch.long, device=env.device
+    )
+    env.state["operation"].x[:, OP_DURATION] = 2.0
+    env.state["operation"].x[:, OP_REMAINING] = 2.0
+    env._mark_lookahead_stale()
+    env._cached_action_mask = None
+    instance = extract_fjsp_instance(env)
+
+    info = {}
+    done = False
+    for op in range(2):
+        action = op * env.n_operations + op
+        _obs, _r, terminated, truncated, info = env.step(action)
+        done = bool(terminated or truncated)
+    assert done
+    assert info.get("success")
+    decoded = decode_oracle(instance, env._assignment_order)
+    assert info["makespan"] == pytest.approx(2.0)
     assert info["makespan"] == pytest.approx(decoded.makespan)
     assert decoded.makespan <= env.current_time + 1e-6
     env.close()

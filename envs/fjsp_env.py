@@ -220,7 +220,9 @@ class FJSPEnv(gym.Env):
         self.last_success = False
         self._episode_steps = 0
         self._assignment_order: List[Tuple[int, int]] = []
-        self._schedule_instance: Any = None
+        self._machine_free = np.zeros(self.n_machines, dtype=np.float64)
+        self._op_completion = np.zeros(self.n_operations, dtype=np.float64)
+        self._classic_cmax = 0.0
         self._cached_action_mask: Optional[np.ndarray] = None
         self._lookahead_stale = True
         self._ready_ops: Optional[torch.Tensor] = None
@@ -622,24 +624,34 @@ class FJSPEnv(gym.Env):
     )
 
     def _begin_episode_schedule(self) -> None:
-        """Snapshot static instance data and clear the assignment sequence."""
-        from solvers.milp import extract_fjsp_instance
-
+        """Clear the assignment sequence and running earliest-start Cmax."""
         self._assignment_order = []
-        self._schedule_instance = extract_fjsp_instance(self)
+        self._machine_free.fill(0.0)
+        self._op_completion.fill(0.0)
+        self._classic_cmax = 0.0
 
     def _classic_logged_makespan(self, success: bool) -> float:
         """Earliest-start Cmax of the inferred assignment sequence, or inf."""
-        if not success or self._schedule_instance is None:
+        if not success:
             return float("inf")
-        from solvers.milp import decode_assignment_schedule
+        return float(self._classic_cmax)
 
-        decoded = decode_assignment_schedule(
-            self._schedule_instance, self._assignment_order
-        )
-        if decoded.status != "Feasible":
-            return float("inf")
-        return float(decoded.makespan)
+    def _accumulate_classic_cmax(self, operation: int, machine: int, proc: float) -> None:
+        """Update running earliest-start Cmax for one constructive assignment."""
+        start = float(self._machine_free[machine])
+        dep = self.state["operation", "precede", "operation"].edge_index
+        if dep.numel() > 0:
+            for pred, succ in zip(dep[0].tolist(), dep[1].tolist()):
+                if int(succ) != operation:
+                    continue
+                pred_done = float(self._op_completion[int(pred)])
+                if pred_done > start:
+                    start = pred_done
+        end = start + float(proc)
+        self._op_completion[operation] = end
+        self._machine_free[machine] = end
+        if end > self._classic_cmax:
+            self._classic_cmax = end
 
     def _mark_lookahead_stale(self) -> None:
         """Invalidate CP / ready / action-mask caches after graph mutation."""
@@ -1199,6 +1211,7 @@ class FJSPEnv(gym.Env):
 
         base_time = self.state['operation'].x[operation, OP_DURATION]
         adjusted_time = base_time * efficiency_modifier
+        self._accumulate_classic_cmax(int(operation), int(machine), float(adjusted_time.item()))
 
         self.state['machine'].x[machine, MACH_QUEUE] += 1
         self.state['machine'].x[machine, MACH_WORKLOAD] += adjusted_time

@@ -13,7 +13,6 @@ from stable_baselines3.common.vec_env import VecEnv
 from heuristics.dispatch_rules import select_heuristic_action
 from solvers.lp_rounding import LpRoundingResult, solve_lp_rounding
 from solvers.milp import (
-    decode_assignment_schedule,
     extract_fjsp_instance,
     milp_episode_metrics,
     solve_makespan,
@@ -96,12 +95,6 @@ def _require_dummy_vec(env: VecEnv, purpose: str) -> None:
         )
 
 
-def _action_to_pair(action: int, n_operations: int) -> Tuple[int, int]:
-    """Decode flat ``machine * n_ops + op`` into ``(operation, machine)``."""
-    a = int(action)
-    return a % n_operations, a // n_operations
-
-
 def _rollout_eval(
     env: VecEnv,
     n_episodes: int,
@@ -110,7 +103,7 @@ def _rollout_eval(
     """Collect ``n_episodes`` constructive schedules via ``choose_actions(obs)``.
 
     The env is only a sequential decoder (ready mask). Reported makespan is
-    classic FJSP Cmax of the inferred assignment sequence.
+    the env's running classic FJSP Cmax from episode info.
     """
     if n_episodes <= 0:
         raise ValueError(f"n_episodes must be positive, got {n_episodes}")
@@ -124,21 +117,13 @@ def _rollout_eval(
 
     n_envs = env.num_envs
     running_lengths = np.zeros(n_envs, dtype=np.int64)
-    orders: List[List[Tuple[int, int]]] = [[] for _ in range(n_envs)]
 
     observations = env.reset()
-    instances = [extract_fjsp_instance(env.envs[i].unwrapped) for i in range(n_envs)]
 
     while len(episode_makespans) < n_episodes:
         start = time.perf_counter()
         actions = choose_actions(observations)
         inference_times.append(time.perf_counter() - start)
-
-        action_arr = np.asarray(actions).reshape(-1)
-        for env_idx, action in enumerate(action_arr):
-            orders[env_idx].append(
-                _action_to_pair(int(action), instances[env_idx].n_operations)
-            )
 
         observations, _rewards, dones, infos = env.step(actions)
         running_lengths += 1
@@ -152,21 +137,16 @@ def _rollout_eval(
                 info = {}
 
             ep = _episode_from_info(info, fallback_length=int(running_lengths[env_idx]))
-            env_success = bool(ep.get("success", False))
-            decoded = decode_assignment_schedule(instances[env_idx], orders[env_idx])
-            success = bool(env_success and decoded.status == "Feasible")
+            mk = float(ep.get("makespan", float("inf")))
+            success = bool(ep.get("success", False)) and np.isfinite(mk)
 
             episode_lengths.append(float(ep.get("l", running_lengths[env_idx])))
-            episode_makespans.append(
-                float(decoded.makespan) if success else float("inf")
-            )
+            episode_makespans.append(mk if success else float("inf"))
             episode_successes.append(1.0 if success else 0.0)
             timed_out = bool(ep.get("truncated", info.get("TimeLimit.truncated", False)))
             episode_timeouts.append(1.0 if timed_out and not success else 0.0)
 
             running_lengths[env_idx] = 0
-            orders[env_idx] = []
-            instances[env_idx] = extract_fjsp_instance(env.envs[env_idx].unwrapped)
 
             if len(episode_makespans) >= n_episodes:
                 break
