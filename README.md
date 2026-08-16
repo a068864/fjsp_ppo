@@ -98,9 +98,9 @@ Action encoding: `action = machine_id * n_operations + operation_id`.
 | `operation —next→ operation`     | FIFO successor on one machine (see below) | —                                                |
 
 
-`next` vs `precede`. `precede` is the instance DAG and never changes meaning. `next` starts empty and is built as the agent assigns: if machine *m* already has a queue `… → A` and the policy then puts *B* on *m*, the env adds `A —next→ B`. That chain is the disjunctive machine order (who waits behind whom). The encoder also sees the reverse `previous`. Only the **front** of each machine queue may process, and only after its `precede` predecessors have **finished**; later `next` successors sit in the queue. Finished ops drop their `next` / `processing` edges.
+`next` vs `precede`. `precede` is the instance DAG and never changes meaning. `next` starts empty and is built as the agent assigns: if machine *m* already has a queue `… → A` and the policy then puts *B* on *m*, the env adds `A —next→ B`. That chain is the disjunctive machine order (who waits behind whom). The encoder also sees the reverse `previous`. Finished ops drop their `next` / `processing` edges.
 
-**Action mask.** Valid actions are unscheduled operations whose **predecessors have all started** (scheduled, processing, or finished — not necessarily finished) **and** an eligible machine. Empty masks fail the episode.
+**Assign vs process.** These two gates are not the same. The **action mask** lets the agent **assign** an unscheduled successor as soon as every `precede` predecessor has **started** (scheduled, processing, or finished — not necessarily finished) **and** a machine is eligible. Empty masks fail the episode. Assignment only queues the op. **Processing** still waits: only the **front** of each machine queue may run, and only after its `precede` predecessors have **finished**; later `next` successors sit in the queue.
 
 **Discrete ticks.** After each assignment the clock advances by a fixed `time_step`. Only actual processed work is subtracted from remaining durations / machine workload; unused fractional tick capacity is **not** transferred to the next queued operation in the same tick. Terminal `rollout()` uses the same tick routine under a FIFO queue assumption.
 

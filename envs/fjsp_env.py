@@ -758,7 +758,13 @@ class FJSPEnv(gym.Env):
             )
 
     def _ready_operation_mask(self, state: Optional[HeteroData] = None) -> torch.Tensor:
-        """Unscheduled ops whose predecessors have all started."""
+        """Unscheduled ops whose precede predecessors have all started.
+
+        Started means scheduled, processing, or finished. This is the
+        assignability gate (action mask / ``OP_READY``). Actual processing
+        still waits for those predecessors to finish; see
+        ``_get_processing_operations``.
+        """
         if state is None:
             state = self.state
         op_x = state["operation"].x
@@ -854,7 +860,11 @@ class FJSPEnv(gym.Env):
         self._lookahead_stale = False
 
     def _compute_action_mask(self, state: Optional[HeteroData] = None) -> np.ndarray:
-        """Vectorized valid-action mask: unscheduled ∧ prereqs started ∧ eligible."""
+        """Valid-action mask: unscheduled ∧ precede preds started ∧ eligible.
+
+        Started means scheduled, processing, or finished. Queued work still
+        does not run until predecessors finish (``_get_processing_operations``).
+        """
         if state is None:
             state = self.state
         n_actions = self.n_machines * self.n_operations
@@ -964,8 +974,10 @@ class FJSPEnv(gym.Env):
         return np.flatnonzero(mask).astype(np.int64).tolist()
 
     def _get_processing_operations(self) -> Tuple[torch.Tensor, int]:
-        """
-        Identify processing operations and count blocked machines.
+        """Queue-front ops that may run: machine front ∧ precede preds finished.
+
+        Unlike the action mask, a scheduled successor stays blocked until
+        predecessors finish — even if it was already assignable.
 
         Returns:
             Tuple of:
