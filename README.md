@@ -30,7 +30,7 @@ python benchmark.py --full-scale --n-env-steps 64 --dummy-vec
 
 This project's instance generator is richer than textbook FJSP:
 
-- **Efficiency.** Eligible machine–operation pairs get a speed multiplier ~N(1, σ) clamped to [0.5, 1.5]. Processing time is `duration × efficiency` (higher factor = slower). Eligibility itself is sparse: each op keeps at least `min_eligible_machines` machines, then extra connections are dropped with `connection_drop_prob`.
+- **Efficiency.** Eligible machine–operation pairs get a speed multiplier ~N(1, σ) clamped to [0.5, 1.5]. Processing time is `duration × efficiency` (higher factor = slower). Eligibility itself is sparse: each op keeps at least `min(min_eligible_machines, n_machines)` machines, then extra connections are dropped with `connection_drop_prob`.
 - **Multiple successors.** After the sequential job chain, extra within-job `parallel` precedences may link an op to later ops in the same job (`shared_dep_prob`). One task can have several successors, and a later task several predecessors.
 - **Cross-job DAG.** Additional precedences may link operations of different jobs (`cross_job_dep_prob`). Edges are rejected if they would cycle or duplicate an existing path.
 
@@ -227,7 +227,7 @@ From the project root (`fjsp_ppo/`):
 python train.py
 ```
 
-Training **starts fresh by default** (`resume=False`) on the **demo-scale** instance (`5×3×4`, 65k steps). Pass `--full-scale` for `25×15×8` + 2 097 152 steps (writes `./checkpoints_full`, not the demo zips).
+Training **starts fresh by default** (`resume=False`) on the **demo-scale** instance (`5×3×4`, 65k steps). Pass `--full-scale` for `25×15×8` + 2 097 152 steps (writes `./checkpoints_full`, not the demo zips). Each run trains at **one configured point size** (`--n-machines` / `--n-jobs` / `--avg-ops` or the demo / full-scale presets). Instance size is **not** sampled on reset.
 
 To continue from a trusted local checkpoint:
 
@@ -264,7 +264,16 @@ python baseline_random.py --full-scale
 
 All hyperparameters live in `config.py` (`TrainConfig`, `EnvConfig`, `ModelConfig`, `PPOConfig`).
 
-**Checkpoint compatibility:** Older `latest_model.zip` / `best_model.zip` files are incompatible when env size, model dims, or PPO batching change. Resume also requires a matching `.meta.json` fingerprint. `--full-scale` writes `./checkpoints_full/` so demo zips under `./checkpoints/` are left alone.
+**Checkpoint compatibility:** Resume still fingerprints the **training** env point size, model dims, and PPO batching — you cannot resume a `5×3×4` run as `25×15×8`. `--full-scale` writes `./checkpoints_full/` so demo zips under `./checkpoints/` are left alone.
+
+**Size-agnostic inference (not mixed-size training).** The GNN has no weights tied to `n_machines` or `n_operations`. Gym `action_space` is dummy `Discrete(2)` (SB3's unused head); live arity is `n_machines * n_operations` on the graph, carried by `action_mask`. A zip trained at one point size can be evaluated at another:
+
+```bash
+python evaluate.py --trust-checkpoint --n-machines 10 --n-jobs 8 --avg-ops 6
+python compare_baselines.py --trust-checkpoint --n-machines 10 --n-jobs 8 --avg-ops 6
+```
+
+Zips saved with `Discrete(n_actions)` / a fixed-length mask `Box` will not load — retrain. Mixed-size PPO minibatches and sampling `n_machines` / `n_jobs` / `avg_ops` on reset are out of scope.
 
 ### Discrete tick semantics
 
@@ -280,6 +289,7 @@ Each `step()` assigns one operation, then advances simulated time by a fixed `ti
 python evaluate.py --trust-checkpoint
 python evaluate.py --model-path ./checkpoints/best_model.zip --n-episodes 20 --trust-checkpoint
 python evaluate.py --stochastic --trust-checkpoint
+python evaluate.py --trust-checkpoint --n-machines 10 --n-jobs 8 --avg-ops 6
 ```
 
 Printed metrics:
@@ -484,8 +494,9 @@ fjsp_ppo/
 - **Native Gymnasium env:** `envs/fjsp_env.py` implements `FJSPEnv` directly.
 - **No graph flattening:** observations carry slim `HeteroData` plus an action mask.
 - **SB3 integration:** `GraphPPO` + `GraphDictRolloutBuffer` store graphs as objects.
-- **Action encoding:** `action = machine_id * n_operations + operation_id`.
+- **Action encoding:** `action = machine_id * n_operations + operation_id`. Gym `action_space` is dummy `Discrete(2)`; live arity is the mask.
 - **Invalid actions:** logits masked with `-1e9`; empty masks raise (value-only bootstrap still allowed).
+- **Size-agnostic load:** evaluate a zip at a different `--n-machines` / `--n-jobs` / `--avg-ops`. Train stays a single point size.
 - **Deterministic PPO:** policy dropout must be `0.0`.
 
 ---
@@ -517,6 +528,7 @@ python train.py --dummy-vec --n-envs 2
 
 - Pass `--resume --trust-checkpoint` only for local checkpoints you trust.
 - Fingerprint mismatches mean config drifted; start fresh or restore the matching config.
+- Zips from before dummy `Discrete(2)` / opaque mask spaces will not load; retrain.
 
 
 

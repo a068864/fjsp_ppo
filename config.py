@@ -109,7 +109,7 @@ class EnvConfig:
 
     @property
     def n_actions(self) -> int:
-        """Flattened discrete action-space size."""
+        """Live flattened action count (Gym ``action_space`` is dummy Discrete(2))."""
         return self.n_machines * self.n_operations
 
     def validate(self) -> None:
@@ -119,11 +119,6 @@ class EnvConfig:
         _require_positive_int("avg_operations_per_job", self.avg_operations_per_job)
         _require_positive_int("max_operation_duration", self.max_operation_duration)
         _require_positive_int("min_eligible_machines", self.min_eligible_machines)
-        if self.min_eligible_machines > self.n_machines:
-            raise ValueError(
-                "min_eligible_machines must be <= n_machines, "
-                f"got {self.min_eligible_machines} > {self.n_machines}"
-            )
         _require_probability("connection_drop_prob", self.connection_drop_prob)
         _require_probability("cross_job_dep_prob", self.cross_job_dep_prob)
         _require_probability("shared_dep_prob", self.shared_dep_prob)

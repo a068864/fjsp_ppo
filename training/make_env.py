@@ -11,7 +11,11 @@ from stable_baselines3.common.vec_env import SubprocVecEnv, VecEnv
 from torch_geometric.data import HeteroData
 
 from config import EnvConfig, TrainConfig
-from envs.fjsp_env import FJSPEnv, make_sb3_graph_observation_space
+from envs.fjsp_env import (
+    FJSPEnv,
+    make_sb3_action_space,
+    make_sb3_graph_observation_space,
+)
 from monitor import FJSPMonitor
 from utils import get_logger, worker_seed
 
@@ -21,17 +25,22 @@ logger = get_logger(__name__)
 def stack_fjsp_obs(obs_list: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     """Stack per-env observations while preserving ``HeteroData`` graphs.
 
-    ``dummy`` and ``action_mask`` are stacked as numeric arrays. ``graph`` is
-    stored as an object array so PyG graphs are never flattened into vectors.
+    ``dummy`` is stacked as a numeric array. ``action_mask`` is stacked as
+    ``(n_envs, A)`` when every env has the same live length; otherwise it is
+    an object array of 1D float32 masks. ``graph`` is an object array so PyG
+    graphs are never flattened into vectors.
     """
     if len(obs_list) == 0:
         raise ValueError("Cannot stack empty observation list")
 
     dummy = np.stack([np.asarray(o["dummy"], dtype=np.float32) for o in obs_list], axis=0)
-    action_mask = np.stack(
-        [np.asarray(o["action_mask"], dtype=np.float32) for o in obs_list],
-        axis=0,
-    )
+    masks = [np.asarray(o["action_mask"], dtype=np.float32).reshape(-1) for o in obs_list]
+    if all(m.shape == masks[0].shape for m in masks):
+        action_mask: Any = np.stack(masks, axis=0)
+    else:
+        action_mask = np.empty((len(masks),), dtype=object)
+        for i, mask in enumerate(masks):
+            action_mask[i] = mask
     graphs = np.empty((len(obs_list),), dtype=object)
     for i, obs in enumerate(obs_list):
         graph = obs["graph"]
@@ -87,13 +96,10 @@ class GraphDummyVecEnv(VecEnv):
         for_eval: bool = False,
     ) -> None:
         self.envs = [fn() for fn in env_fns]
-        env = self.envs[0]
-        n_actions = int(env.action_space.n)
-        observation_space = make_sb3_graph_observation_space(n_actions)
         super().__init__(
             num_envs=len(env_fns),
-            observation_space=observation_space,
-            action_space=env.action_space,
+            observation_space=make_sb3_graph_observation_space(),
+            action_space=make_sb3_action_space(),
         )
         self.actions: Optional[np.ndarray] = None
         self.buf_rews = np.zeros(self.num_envs, dtype=np.float64)
@@ -205,9 +211,8 @@ class GraphSubprocVecEnv(SubprocVecEnv):
 
     def __init__(self, env_fns: Sequence[Callable[[], gym.Env]], start_method: Optional[str] = None):
         super().__init__(env_fns, start_method=start_method or "spawn")
-        # Replace observation space with SB3-friendly Dict (graphs remain object arrays).
-        n_actions = int(self.action_space.n)
-        self.observation_space = make_sb3_graph_observation_space(n_actions)
+        self.observation_space = make_sb3_graph_observation_space()
+        self.action_space = make_sb3_action_space()
 
     def reset(self) -> Dict[str, Any]:
         # Match SB3 SubprocVecEnv: worker expects (seed, options), not None.

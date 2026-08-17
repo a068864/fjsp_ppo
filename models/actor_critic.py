@@ -152,16 +152,24 @@ class GraphActorCritic(nn.Module):
     def _as_mask_list(
         action_mask: MaskInput,
         batch_size: int,
-        n_actions: int,
         device: torch.device,
     ) -> Optional[List[torch.Tensor]]:
         if action_mask is None:
             return None
 
-        if isinstance(action_mask, np.ndarray):
+        if isinstance(action_mask, np.ndarray) and action_mask.dtype == object:
+            masks = [torch.as_tensor(action_mask[i]) for i in range(action_mask.shape[0])]
+        elif isinstance(action_mask, np.ndarray):
             action_mask = torch.as_tensor(action_mask)
-
-        if isinstance(action_mask, torch.Tensor):
+            if action_mask.dim() == 1:
+                masks = [action_mask]
+            elif action_mask.dim() == 2:
+                masks = [action_mask[i] for i in range(action_mask.size(0))]
+            else:
+                raise ValueError(
+                    f"action_mask tensor must be 1D or 2D, got shape {tuple(action_mask.shape)}"
+                )
+        elif isinstance(action_mask, torch.Tensor):
             if action_mask.dim() == 1:
                 masks = [action_mask]
             elif action_mask.dim() == 2:
@@ -182,14 +190,24 @@ class GraphActorCritic(nn.Module):
                 f"Expected {batch_size} action masks, got {len(masks)}"
             )
 
-        out: List[torch.Tensor] = []
-        for mask in masks:
-            flat = mask.reshape(-1).to(device=device, dtype=torch.float32)
-            if flat.numel() != n_actions:
-                raise ValueError(
-                    f"Action mask length {flat.numel()} != n_actions {n_actions}"
-                )
-            out.append(flat)
+        return [
+            mask.reshape(-1).to(device=device, dtype=torch.float32) for mask in masks
+        ]
+
+    @staticmethod
+    def _pad_row_tensors(
+        rows: Sequence[torch.Tensor],
+        pad_value: float,
+    ) -> torch.Tensor:
+        """Stack 1D tensors, padding the trailing axis to max length."""
+        batch = len(rows)
+        if batch == 0:
+            raise ValueError("Cannot pad an empty tensor list")
+        widths = [int(tensor.numel()) for tensor in rows]
+        max_a = max(widths)
+        out = rows[0].new_full((batch, max_a), pad_value)
+        for i, tensor in enumerate(rows):
+            out[i, : widths[i]] = tensor.reshape(-1)
         return out
 
     @staticmethod
@@ -253,7 +271,9 @@ class GraphActorCritic(nn.Module):
         Returns:
             ``(logits, values)``:
                 - single graph: logits ``(A,)``, value ``()``
-                - batch: logits ``(B, A)``, values ``(B,)``
+                - same-size batch: logits ``(B, A)``, values ``(B,)``
+                - mixed ``(M, N)``: logits ``(B, max_A)`` padded with
+                  ``MASK_LOGIT``; not used for PPO minibatches
         """
         graphs = self._as_graph_list(data)
         batch_size = len(graphs)
@@ -262,7 +282,8 @@ class GraphActorCritic(nn.Module):
 
         device = next(self.parameters()).device
         # Same-size graphs collate without changing embeddings (encode_batch
-        # splits on ptr). Mixed sizes fall back to per-graph forwards.
+        # splits on ptr). Mixed sizes fall back inside encode_batch; actor
+        # still uses per-graph pair scores then pads logits.
         machine_list, operation_list, graph_emb_batch = self.encoder.encode_batch(graphs)
         values = self.critic(graph_emb_batch).squeeze(-1)
 
@@ -290,27 +311,30 @@ class GraphActorCritic(nn.Module):
                 self._assignment_logits(graph, machine_list[i], operation_list[i], device)
                 for i, graph in enumerate(graphs)
             ]
-            n_actions_i = {int(t.numel()) for t in logits_list}
-            if len(n_actions_i) != 1:
-                raise ValueError(
-                    "All graphs in a batch must share the same action dimension; "
-                    f"got {sorted(n_actions_i)}"
-                )
-            logits = torch.stack(logits_list, dim=0)
+            logits = self._pad_row_tensors(logits_list, MASK_LOGIT)
 
-        n_actions = int(logits.size(-1))
         if action_mask is not None:
-            if isinstance(action_mask, torch.Tensor) and action_mask.dim() == 2:
+            if (
+                isinstance(action_mask, torch.Tensor)
+                and action_mask.dim() == 2
+                and tuple(action_mask.shape) == tuple(logits.shape)
+            ):
                 mask = action_mask.to(device=logits.device, dtype=logits.dtype)
-                if tuple(mask.shape) != tuple(logits.shape):
-                    raise ValueError(
-                        f"Mask shape {tuple(mask.shape)} does not match logits {tuple(logits.shape)}"
-                    )
                 logits = logits.masked_fill(mask < 0.5, MASK_LOGIT)
             else:
-                masks = self._as_mask_list(action_mask, batch_size, n_actions, device)
+                masks = self._as_mask_list(action_mask, batch_size, device)
                 assert masks is not None
-                logits = logits.masked_fill(torch.stack(masks, dim=0) < 0.5, MASK_LOGIT)
+                mask = self._pad_row_tensors(masks, 0.0)
+                if mask.size(-1) > logits.size(-1):
+                    raise ValueError(
+                        f"Mask width {int(mask.size(-1))} exceeds logits "
+                        f"{int(logits.size(-1))}"
+                    )
+                if mask.size(-1) < logits.size(-1):
+                    padded = mask.new_zeros(logits.shape)
+                    padded[:, : mask.size(-1)] = mask
+                    mask = padded
+                logits = logits.masked_fill(mask < 0.5, MASK_LOGIT)
 
         if batch_size == 1:
             return logits.reshape(-1), values.squeeze(0)
@@ -328,4 +352,4 @@ class GraphActorCritic(nn.Module):
         return values
 
 
-__all__ = ["GraphActorCritic"]
+__all__ = ["GraphActorCritic", "MASK_LOGIT"]

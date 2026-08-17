@@ -57,10 +57,18 @@ class HeteroGraphSpace(spaces.Space):
         return isinstance(x, HeteroData)
 
 
-def _numeric_obs_spaces(n_actions: int) -> Tuple[spaces.Box, spaces.Box]:
-    dummy = spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32)
-    mask = spaces.Box(low=0.0, high=1.0, shape=(int(n_actions),), dtype=np.float32)
-    return dummy, mask
+def _dummy_obs_box() -> spaces.Box:
+    return spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32)
+
+
+def _opaque_obs_box() -> spaces.Box:
+    """SB3 placeholder: live values are not this Box (mask length / HeteroData)."""
+    return spaces.Box(low=-np.inf, high=np.inf, shape=(0,), dtype=np.float32)
+
+
+def make_sb3_action_space() -> spaces.Discrete:
+    """Unused SB3 Discrete head; live arity is ``n_machines * n_operations``."""
+    return spaces.Discrete(2)
 
 
 class GraphObsSpace(spaces.Space):
@@ -68,21 +76,33 @@ class GraphObsSpace(spaces.Space):
 
     SB3 / Gymnasium require an ``observation_space``. The policy consumes the
     ``HeteroData`` graph directly from the observation dict; this space does
-    not flatten graph features into a vector.
+    not flatten graph features into a vector. Action-mask length is the live
+    instance arity and is not part of the space.
     """
 
-    def __init__(self, n_actions: int) -> None:
+    def __init__(self, n_actions: Optional[int] = None) -> None:
         super().__init__(shape=None, dtype=None)
-        self.n_actions = int(n_actions)
-        self.dummy_space, self.mask_space = _numeric_obs_spaces(self.n_actions)
+        # n_actions is ignored: contains() accepts any 1D mask in [0, 1].
+        self.n_actions = None if n_actions is None else int(n_actions)
+        self.dummy_space = _dummy_obs_box()
         self.graph_space = HeteroGraphSpace()
 
     def sample(self, mask: Any = None) -> Dict[str, Any]:
+        n = 1 if self.n_actions is None else self.n_actions
         return {
             "dummy": self.dummy_space.sample(),
-            "action_mask": np.ones((self.n_actions,), dtype=np.float32),
+            "action_mask": np.ones((n,), dtype=np.float32),
             "graph": self.graph_space.sample(),
         }
+
+    @staticmethod
+    def _mask_ok(mask: Any) -> bool:
+        arr = np.asarray(mask, dtype=np.float32)
+        if arr.ndim != 1 or arr.size == 0:
+            return False
+        if not np.isfinite(arr).all():
+            return False
+        return bool(np.all((arr >= 0.0) & (arr <= 1.0)))
 
     def contains(self, x: Any) -> bool:
         if not isinstance(x, dict):
@@ -91,31 +111,30 @@ class GraphObsSpace(spaces.Space):
             return False
         if not self.dummy_space.contains(np.asarray(x["dummy"], dtype=np.float32)):
             return False
-        mask_arr = np.asarray(x["action_mask"], dtype=np.float32)
-        if not self.mask_space.contains(mask_arr):
+        if not self._mask_ok(x["action_mask"]):
             return False
         return self.graph_space.contains(x["graph"])
 
 
-def make_sb3_graph_observation_space(n_actions: int) -> spaces.Dict:
+def make_sb3_graph_observation_space(n_actions: Optional[int] = None) -> spaces.Dict:
     """SB3-friendly Dict space for VecEnv / rollout buffers.
 
-    Runtime ``graph`` values remain object arrays of ``HeteroData``. The graph
-    subspace is an empty-shaped Box (not a fake length-1 feature vector) so
-    SB3 ``get_obs_shape`` accepts it while documenting that no flat graph
-    vector is provided. Env-level ``GraphObsSpace`` still uses
+    Runtime ``graph`` values remain object arrays of ``HeteroData``. Runtime
+    ``action_mask`` values remain 1D float32 of live length. Both subspaces
+    are empty-shaped Boxes so SB3 ``get_obs_shape`` accepts them without
+    baking instance size into the zip. Env-level ``GraphObsSpace`` still uses
     ``HeteroGraphSpace`` for truthful ``contains`` checks.
+
+    ``n_actions`` is ignored (kept so older call sites still import).
     """
-    n_actions = int(n_actions)
-    dummy, mask = _numeric_obs_spaces(n_actions)
+    del n_actions
+    dummy = _dummy_obs_box()
+    opaque = _opaque_obs_box()
     return spaces.Dict(
         {
             "dummy": dummy,
-            "action_mask": mask,
-            # Opaque carrier: shape (0,) — not a flattened graph embedding.
-            "graph": spaces.Box(
-                low=-np.inf, high=np.inf, shape=(0,), dtype=np.float32
-            ),
+            "action_mask": opaque,
+            "graph": opaque,
         }
     )
 
@@ -124,7 +143,8 @@ class FJSPEnv(gym.Env):
     """Flexible Job Shop Scheduling environment (Gymnasium + PyG HeteroData).
 
     Observations are opaque dicts containing the live ``HeteroData`` graph and
-    an action mask. Actions are flat discrete indices::
+    an action mask. Gym ``action_space`` is dummy ``Discrete(2)`` so SB3 zips
+    are size-agnostic. Live actions are flat indices::
 
         action = machine_id * n_operations + operation_id
     """
@@ -157,7 +177,8 @@ class FJSPEnv(gym.Env):
             connection_drop_prob: Probability of dropping machine-operation connections.
             compatible_efficiency_std: Standard deviation for machine efficiency.
             time_step: Granularity of time progression.
-            min_eligible_machines: Minimum machines eligible for an operation.
+            min_eligible_machines: Minimum machines eligible for an operation
+                (clamped to ``n_machines``).
             cross_job_dep_prob: Probability of cross-job dependencies.
             shared_dep_prob: Probability of shared dependencies.
             seed: Random seed for reproducibility.
@@ -233,8 +254,10 @@ class FJSPEnv(gym.Env):
         self._front_ops = torch.empty(0, dtype=torch.long, device=self.device)
         self._front_can_process = torch.empty(0, dtype=torch.bool, device=self.device)
 
-        self.action_space = spaces.Discrete(self.n_machines * self.n_operations)
-        self.observation_space = GraphObsSpace(self.n_machines * self.n_operations)
+        # Dummy Discrete(2): SB3 builds an unused Linear head of this width.
+        # Live actions are flat indices ``machine * n_operations + operation``.
+        self.action_space = make_sb3_action_space()
+        self.observation_space = GraphObsSpace()
 
     def _create_job_sequences(self) -> List[List[int]]:
         """Partition all operations into ``n_jobs`` non-empty job sequences.
@@ -310,13 +333,14 @@ class FJSPEnv(gym.Env):
             Binary tensor indicating machine-operation eligibility
         """
         n_ops, n_mach = self.n_operations, self.n_machines
+        keep_k = min(int(self.min_eligible_machines), int(n_mach))
         scores = torch.rand(
             (n_ops, n_mach), generator=self.torch_gen, device=self.device
         )
         perm = torch.argsort(scores, dim=1)
         eligibility = torch.zeros((n_ops, n_mach), dtype=torch.bool, device=self.device)
-        eligibility.scatter_(1, perm[:, : self.min_eligible_machines], True)
-        extra = n_mach - self.min_eligible_machines
+        eligibility.scatter_(1, perm[:, :keep_k], True)
+        extra = n_mach - keep_k
         if extra > 0:
             keep = (
                 torch.rand(
@@ -324,7 +348,7 @@ class FJSPEnv(gym.Env):
                 )
                 > self.connection_drop_prob
             )
-            eligibility.scatter_(1, perm[:, self.min_eligible_machines :], keep)
+            eligibility.scatter_(1, perm[:, keep_k:], keep)
         return eligibility
 
     @staticmethod

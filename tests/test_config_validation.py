@@ -27,7 +27,7 @@ from training.eval_cli import apply_shared_eval_args
         (lambda: EnvConfig(time_step=0.0), "time_step"),
         (lambda: EnvConfig(time_penalty=0.0), "time_penalty"),
         (
-            lambda: EnvConfig(n_machines=2, min_eligible_machines=3),
+            lambda: EnvConfig(n_machines=2, min_eligible_machines=0),
             "min_eligible_machines",
         ),
         (lambda: ModelConfig(hidden_dim=0), "hidden_dim"),
@@ -165,5 +165,11 @@ def test_eval_cli_revalidates_after_mutation():
 def test_direct_env_constructor_reuses_config_validation():
     from envs.fjsp_env import FJSPEnv
 
-    with pytest.raises(ValueError, match="min_eligible_machines"):
-        FJSPEnv(n_machines=1, min_eligible_machines=2)
+    with pytest.raises(ValueError, match="n_jobs"):
+        FJSPEnv(n_machines=2, n_jobs=0)
+
+
+def test_env_config_allows_min_eligible_above_n_machines():
+    cfg = EnvConfig(n_machines=1, min_eligible_machines=2)
+    assert cfg.min_eligible_machines == 2
+    assert cfg.n_machines == 1

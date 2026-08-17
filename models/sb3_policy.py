@@ -15,7 +15,7 @@ from torch_geometric.data import HeteroData
 
 from config import ModelConfig
 from models.actor_critic import GraphActorCritic
-from training.graph_buffer import GRAPH_KEY, graph_obs_as_tensor
+from training.graph_buffer import ACTION_MASK_KEY, GRAPH_KEY, graph_obs_as_tensor
 from utils import get_logger
 
 logger = get_logger(__name__)
@@ -77,7 +77,8 @@ class GraphActorCriticPolicy(ActorCriticPolicy):
         )
 
         self.graph_ac = GraphActorCritic(model_config=self.model_config)
-        self.action_dist = CategoricalDistribution(int(action_space.n))
+        # Parent built CategoricalDistribution(action_space.n) for the unused
+        # Discrete(2) head. Live categoricals use logits width (see _categorical).
 
         self.optimizer = self.optimizer_class(
             self.parameters(),
@@ -105,12 +106,7 @@ class GraphActorCriticPolicy(ActorCriticPolicy):
                 f"got {type(observation)}"
             )
 
-        mask = np.asarray(
-            observation["action_mask"].detach().cpu()
-            if torch.is_tensor(observation["action_mask"])
-            else observation["action_mask"]
-        )
-        vectorized = mask.ndim >= 2
+        vectorized = not isinstance(observation.get(GRAPH_KEY), HeteroData)
 
         packed: Dict[str, Any] = {}
         for key, value in observation.items():
@@ -130,6 +126,8 @@ class GraphActorCriticPolicy(ActorCriticPolicy):
                     arr = np.empty((1,), dtype=object)
                     arr[0] = value
                     packed[key] = arr
+            elif key == ACTION_MASK_KEY:
+                packed[key] = self._pack_action_mask(value, vectorized=vectorized)
             else:
                 arr = value.detach().cpu().numpy() if torch.is_tensor(value) else np.asarray(value)
                 if not vectorized and arr.ndim == 1:
@@ -137,6 +135,23 @@ class GraphActorCriticPolicy(ActorCriticPolicy):
                 packed[key] = arr
 
         return graph_obs_as_tensor(packed, self.device), vectorized
+
+    @staticmethod
+    def _pack_action_mask(value: Any, *, vectorized: bool) -> Any:
+        if torch.is_tensor(value):
+            value = value.detach().cpu().numpy()
+        if isinstance(value, (list, tuple)):
+            arr = np.empty((len(value),), dtype=object)
+            for i, mask in enumerate(value):
+                arr[i] = np.asarray(mask, dtype=np.float32).reshape(-1)
+            return arr
+        arr = np.asarray(value)
+        if arr.dtype == object:
+            return arr
+        arr = np.asarray(arr, dtype=np.float32)
+        if not vectorized and arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        return arr
 
     @staticmethod
     def _to_list(obj: Any) -> List[Any]:
@@ -152,8 +167,8 @@ class GraphActorCriticPolicy(ActorCriticPolicy):
 
     def _unpack_obs(
         self, obs: Any
-    ) -> Tuple[List[HeteroData], Optional[torch.Tensor]]:
-        """Extract graph list and optional action-mask tensor from an observation."""
+    ) -> Tuple[List[HeteroData], Any]:
+        """Extract graph list and optional action masks from an observation."""
         if not isinstance(obs, dict):
             raise TypeError(
                 "GraphActorCriticPolicy expects dict observations with keys "
@@ -171,27 +186,48 @@ class GraphActorCriticPolicy(ActorCriticPolicy):
                 )
             cleaned.append(graph)
 
-        masks_tensor: Optional[torch.Tensor] = None
-        if "action_mask" in obs and obs["action_mask"] is not None:
-            masks = obs["action_mask"]
-            if not torch.is_tensor(masks):
-                masks = torch.as_tensor(masks)
-            masks = masks.to(device=self.device)
-            if not torch.is_floating_point(masks):
-                masks = masks.float()
-            if masks.dim() == 1:
-                masks = masks.unsqueeze(0)
-            masks_tensor = masks
+        masks_in: Any = None
+        if ACTION_MASK_KEY in obs and obs[ACTION_MASK_KEY] is not None:
+            masks = obs[ACTION_MASK_KEY]
+            if isinstance(masks, np.ndarray) and masks.dtype == object:
+                masks_in = [
+                    torch.as_tensor(masks[i], device=self.device, dtype=torch.float32).reshape(-1)
+                    for i in range(masks.shape[0])
+                ]
+            elif isinstance(masks, (list, tuple)):
+                masks_in = [
+                    torch.as_tensor(item, device=self.device, dtype=torch.float32).reshape(-1)
+                    for item in masks
+                ]
+            else:
+                if not torch.is_tensor(masks):
+                    masks = torch.as_tensor(masks)
+                masks = masks.to(device=self.device)
+                if not torch.is_floating_point(masks):
+                    masks = masks.float()
+                if masks.dim() == 1:
+                    masks = masks.unsqueeze(0)
+                masks_in = masks
 
-        return cleaned, masks_tensor
+        return cleaned, masks_in
+
+    @staticmethod
+    def _mask_has_empty_row(masks: Any) -> bool:
+        if torch.is_tensor(masks):
+            return bool(((masks >= 0.5).sum(dim=-1) == 0).any().item())
+        return any(int((mask >= 0.5).sum().item()) == 0 for mask in masks)
+
+    @staticmethod
+    def _categorical(logits: torch.Tensor) -> CategoricalDistribution:
+        dist = CategoricalDistribution(int(logits.size(-1)))
+        return dist.proba_distribution(action_logits=logits)
 
     def _masked_logits_and_values(
         self, obs: Any, *, require_valid_actions: bool = True
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         graphs, masks = self._unpack_obs(obs)
         if require_valid_actions and masks is not None:
-            valid_counts = (masks >= 0.5).sum(dim=-1)
-            if bool((valid_counts == 0).any().item()):
+            if self._mask_has_empty_row(masks):
                 raise ValueError(
                     "Empty action mask: cannot construct an action distribution"
                 )
@@ -208,7 +244,7 @@ class GraphActorCriticPolicy(ActorCriticPolicy):
         deterministic: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         logits, values = self._masked_logits_and_values(obs, require_valid_actions=True)
-        distribution = self.action_dist.proba_distribution(action_logits=logits)
+        distribution = self._categorical(logits)
         actions = distribution.get_actions(deterministic=deterministic)
         log_prob = distribution.log_prob(actions)
         return actions, values, log_prob
@@ -217,14 +253,14 @@ class GraphActorCriticPolicy(ActorCriticPolicy):
         self, obs: Any, actions: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         logits, values = self._masked_logits_and_values(obs, require_valid_actions=True)
-        distribution = self.action_dist.proba_distribution(action_logits=logits)
+        distribution = self._categorical(logits)
         log_prob = distribution.log_prob(actions)
         entropy = distribution.entropy()
         return values, log_prob, entropy
 
     def get_distribution(self, obs: Any) -> CategoricalDistribution:
         logits, _ = self._masked_logits_and_values(obs, require_valid_actions=True)
-        return self.action_dist.proba_distribution(action_logits=logits)
+        return self._categorical(logits)
 
     def predict_values(self, obs: Any) -> torch.Tensor:
         # Value-only terminal bootstrapping must remain valid with empty masks.

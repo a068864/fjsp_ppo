@@ -5,11 +5,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
-from gymnasium import spaces
 from torch_geometric.data import HeteroData
 
 from config import ModelConfig
-from envs.fjsp_env import FJSPEnv, OP_FEATURE_DIM
+from envs.fjsp_env import (
+    FJSPEnv,
+    OP_FEATURE_DIM,
+    make_sb3_action_space,
+    make_sb3_graph_observation_space,
+)
 from models.actor_critic import GraphActorCritic
 from models.sb3_policy import GraphActorCriticPolicy
 
@@ -120,14 +124,8 @@ def test_policy_rejects_all_zero_masks_for_action_distribution():
     cfg = ModelConfig(hidden_dim=16, num_layers=1, num_heads=2, critic_hidden_dim=32)
     n_actions = 4
     policy = GraphActorCriticPolicy(
-        observation_space=spaces.Dict(
-            {
-                "dummy": spaces.Box(-np.inf, np.inf, shape=(1,), dtype=np.float32),
-                "action_mask": spaces.Box(0.0, 1.0, shape=(n_actions,), dtype=np.float32),
-                "graph": spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            }
-        ),
-        action_space=spaces.Discrete(n_actions),
+        observation_space=make_sb3_graph_observation_space(),
+        action_space=make_sb3_action_space(),
         lr_schedule=lambda _: 1e-3,
         model_config=cfg,
     )
@@ -142,14 +140,8 @@ def test_policy_value_only_allows_terminal_bootstrap_with_empty_mask():
     cfg = ModelConfig(hidden_dim=16, num_layers=1, num_heads=2, critic_hidden_dim=32)
     n_actions = 4
     policy = GraphActorCriticPolicy(
-        observation_space=spaces.Dict(
-            {
-                "dummy": spaces.Box(-np.inf, np.inf, shape=(1,), dtype=np.float32),
-                "action_mask": spaces.Box(0.0, 1.0, shape=(n_actions,), dtype=np.float32),
-                "graph": spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            }
-        ),
-        action_space=spaces.Discrete(n_actions),
+        observation_space=make_sb3_graph_observation_space(),
+        action_space=make_sb3_action_space(),
         lr_schedule=lambda _: 1e-3,
         model_config=cfg,
     )
@@ -166,16 +158,8 @@ def test_old_new_log_probabilities_match_before_optimization():
     obs, _ = env.reset(seed=0)
     cfg = ModelConfig(hidden_dim=16, num_layers=1, num_heads=2, critic_hidden_dim=32)
     policy = GraphActorCriticPolicy(
-        observation_space=spaces.Dict(
-            {
-                "dummy": spaces.Box(-np.inf, np.inf, shape=(1,), dtype=np.float32),
-                "action_mask": spaces.Box(
-                    0.0, 1.0, shape=(env.action_space.n,), dtype=np.float32
-                ),
-                "graph": spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            }
-        ),
-        action_space=env.action_space,
+        observation_space=make_sb3_graph_observation_space(),
+        action_space=make_sb3_action_space(),
         lr_schedule=lambda _: 1e-3,
         model_config=cfg,
     )

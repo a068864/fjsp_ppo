@@ -50,10 +50,12 @@ def test_sb3_space_graph_subspace_is_truthful():
     space = make_sb3_graph_observation_space(8)
     assert isinstance(space, spaces.Dict)
     graph_space = space.spaces["graph"]
+    mask_space = space.spaces["action_mask"]
     # Placeholder Box(1,) is not truthful; expect an opaque empty-shaped Box.
     assert isinstance(graph_space, spaces.Box)
     assert tuple(graph_space.shape) != (1,)
     assert tuple(graph_space.shape) == (0,)
+    assert tuple(mask_space.shape) == (0,)
 
 
 def test_action_mask_is_not_shared_mutable_cache():

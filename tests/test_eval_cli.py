@@ -7,6 +7,7 @@ from training.eval_cli import (
     apply_shared_eval_args,
     build_eval_train_config,
     eval_config_from_args,
+    make_eval_vec_env,
 )
 
 
@@ -83,6 +84,28 @@ def test_build_eval_train_config_uses_eval_seed():
     assert train_cfg.seed == 11
     assert train_cfg.eval_seed == 11
     assert train_cfg.env.n_machines == cfg.env.n_machines
+
+
+def test_eval_cli_override_changes_env_size():
+    args = Namespace(
+        n_episodes=None,
+        seed=None,
+        n_machines=10,
+        n_jobs=8,
+        avg_operations_per_job=6,
+    )
+    cfg = apply_shared_eval_args(get_default_eval_config(), args)
+    env = make_eval_vec_env(cfg)
+    try:
+        inner = env.envs[0].unwrapped
+        assert inner.n_machines == 10
+        assert inner.n_jobs == 8
+        assert inner.avg_operations_per_job == 6
+        obs = env.reset()
+        assert obs["action_mask"].shape[-1] == 10 * 8 * 6
+        assert inner.n_operations == 48
+    finally:
+        env.close()
 
 
 def test_compare_baselines_cli_flags():

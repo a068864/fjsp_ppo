@@ -13,6 +13,56 @@ from stable_baselines3.common.vec_env import VecNormalize
 from torch_geometric.data import HeteroData
 
 GRAPH_KEY = "graph"
+ACTION_MASK_KEY = "action_mask"
+
+
+def _is_opaque_shape(obs_input_shape: Any) -> bool:
+    return tuple(obs_input_shape) == (0,)
+
+
+def _copy_numeric_object_row(values: Any, n_envs: int) -> np.ndarray:
+    """Store one timestep of variable-length vectors as object rows."""
+    arr = np.empty((n_envs,), dtype=object)
+    if isinstance(values, np.ndarray) and values.dtype == object:
+        for i in range(n_envs):
+            arr[i] = np.array(values[i], dtype=np.float32, copy=True)
+        return arr
+    stacked = np.asarray(values, dtype=np.float32)
+    if stacked.ndim == 1 and n_envs == 1:
+        arr[0] = np.array(stacked, dtype=np.float32, copy=True)
+        return arr
+    for i in range(n_envs):
+        arr[i] = np.array(stacked[i], dtype=np.float32, copy=True)
+    return arr
+
+
+def masks_as_policy_input(
+    value: Any,
+    device: Union[th.device, str],
+) -> Any:
+    """Convert stored masks to a stacked tensor, or a list if lengths differ."""
+    if th.is_tensor(value):
+        tensor = value
+        if not th.is_floating_point(tensor):
+            tensor = tensor.float()
+        return tensor.to(device)
+    if isinstance(value, np.ndarray) and value.dtype == object:
+        rows = [
+            th.as_tensor(value[i], dtype=th.float32).reshape(-1)
+            for i in range(value.shape[0])
+        ]
+        if rows and all(int(row.numel()) == int(rows[0].numel()) for row in rows):
+            return th.stack(rows, dim=0).to(device)
+        return [row.to(device) for row in rows]
+    if isinstance(value, (list, tuple)):
+        rows = [th.as_tensor(item, dtype=th.float32).reshape(-1) for item in value]
+        if rows and all(int(row.numel()) == int(rows[0].numel()) for row in rows):
+            return th.stack(rows, dim=0).to(device)
+        return [row.to(device) for row in rows]
+    tensor = th.as_tensor(value)
+    if not th.is_floating_point(tensor):
+        tensor = tensor.float()
+    return tensor.to(device)
 
 
 def slim_graph_for_policy(graph: HeteroData, *, clone: bool = True) -> HeteroData:
@@ -55,6 +105,9 @@ def graph_obs_as_tensor(
         if key == GRAPH_KEY:
             converted[key] = value
             continue
+        if key == ACTION_MASK_KEY:
+            converted[key] = masks_as_policy_input(value, device)
+            continue
         tensor = th.as_tensor(value)
         if not th.is_floating_point(tensor):
             tensor = tensor.float()
@@ -65,15 +118,16 @@ def graph_obs_as_tensor(
 class GraphDictRolloutBuffer(DictRolloutBuffer):
     """Dict rollout buffer that stores opaque ``HeteroData`` graphs as objects.
 
-    Numeric keys (``dummy``, ``action_mask``, ...) remain float32. The ``graph``
-    key is stored as ``dtype=object`` and is never cast through ``to_torch``.
+    Numeric keys with a fixed Box stay float32. Opaque ``Box(shape=(0,))``
+    keys (``graph``, ``action_mask``) are stored as ``dtype=object`` and are
+    not allocated through the empty Box shape.
     """
 
     def reset(self) -> None:
         assert isinstance(self.obs_shape, dict), "GraphDictRolloutBuffer requires Dict obs"
         self.observations = {}
         for key, obs_input_shape in self.obs_shape.items():
-            if key == GRAPH_KEY:
+            if key == GRAPH_KEY or _is_opaque_shape(obs_input_shape):
                 self.observations[key] = np.empty(
                     (self.buffer_size, self.n_envs),
                     dtype=object,
@@ -121,6 +175,12 @@ class GraphDictRolloutBuffer(DictRolloutBuffer):
                 self.observations[key][self.pos] = arr
                 continue
 
+            if _is_opaque_shape(self.obs_shape[key]):
+                self.observations[key][self.pos] = _copy_numeric_object_row(
+                    obs[key], self.n_envs
+                )
+                continue
+
             obs_ = np.array(obs[key])
             if isinstance(self.observation_space.spaces[key], spaces.Discrete):
                 obs_ = obs_.reshape((self.n_envs,) + self.obs_shape[key])
@@ -144,7 +204,9 @@ class GraphDictRolloutBuffer(DictRolloutBuffer):
         indices = np.random.permutation(self.buffer_size * self.n_envs)
         if not self.generator_ready:
             for key, obs in self.observations.items():
-                if key == GRAPH_KEY:
+                if key == GRAPH_KEY or (
+                    isinstance(obs, np.ndarray) and obs.dtype == object
+                ):
                     # (buffer_size, n_envs) -> (buffer_size * n_envs,)
                     self.observations[key] = obs.swapaxes(0, 1).reshape(-1)
                 else:
@@ -171,6 +233,8 @@ class GraphDictRolloutBuffer(DictRolloutBuffer):
         for key, obs in self.observations.items():
             if key == GRAPH_KEY:
                 observations[key] = obs[batch_inds]
+            elif isinstance(obs, np.ndarray) and obs.dtype == object:
+                observations[key] = masks_as_policy_input(obs[batch_inds], self.device)
             else:
                 observations[key] = self.to_torch(obs[batch_inds])
 
@@ -184,4 +248,11 @@ class GraphDictRolloutBuffer(DictRolloutBuffer):
         )
 
 
-__all__ = ["GRAPH_KEY", "GraphDictRolloutBuffer", "graph_obs_as_tensor", "slim_graph_for_policy"]
+__all__ = [
+    "ACTION_MASK_KEY",
+    "GRAPH_KEY",
+    "GraphDictRolloutBuffer",
+    "graph_obs_as_tensor",
+    "masks_as_policy_input",
+    "slim_graph_for_policy",
+]

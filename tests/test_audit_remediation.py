@@ -54,11 +54,10 @@ def test_fingerprint_ignores_seed_device_and_log_paths(tmp_path):
 def test_buffer_add_does_not_clone_already_slim_graph():
     env = FJSPEnv(n_machines=2, n_jobs=2, avg_operations_per_job=2, seed=0, device="cpu")
     obs, _ = env.reset(seed=0)
-    n_actions = int(env.action_space.n)
     buf = GraphDictRolloutBuffer(
         buffer_size=2,
-        observation_space=make_sb3_graph_observation_space(n_actions),
-        action_space=spaces.Discrete(n_actions),
+        observation_space=make_sb3_graph_observation_space(),
+        action_space=spaces.Discrete(2),
         device="cpu",
         n_envs=1,
         gae_lambda=0.95,
