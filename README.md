@@ -61,7 +61,7 @@ The policy never outputs a full timetable. It builds a schedule **one assignment
 Pipeline:
 
 1. **Graph** — live `HeteroData` of operations and machines (node features + typed edges).
-2. **Encoder** — heterogeneous Transformer convolutions produce node embeddings.
+2. **Encoder** — residual heterogeneous TransformerConv blocks (each with an FFN) produce node embeddings.
 3. **Masked logits** — an `EdgePredictor` scores every `(machine, operation)` pair; invalid actions get `-1e9`.
 4. **PPO** — `GraphPPO` updates the shared encoder / actor / critic from those masked categoricals.
 5. **Classic $C_{\mathrm{max}}$** — evaluation decodes the assignment sequence into earliest-start completion times and reports the latest finish. That is the same objective the MILP minimizes.
@@ -115,8 +115,8 @@ Action encoding: `action = machine_id * n_operations + operation_id`.
 
 | Piece                    | Role                                                                                                                                                                                                          |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GraphEncoder`           | Projects op/machine features, runs residual `HeteroConv` / `TransformerConv` layers, attention-pools both node types into a graph embedding. Time columns are scaled by per-graph mean duration.              |
-| `EdgePredictor`          | Scores every machine–operation pair (default **bilinear**, optional dot-product). A learned bias uses ECT-style compatibility scores (`-expected_completion / mean_duration`) from the efficiency edge attrs. |
+| `GraphEncoder`           | Projects op/machine features, then `num_layers` residual `HeteroConv` / `TransformerConv` blocks. Each block is LN+GELU plus a residual FFN (`H→4H→H`, last linear zero-init). Attention-pools both node types into a graph embedding. Time columns are scaled by per-graph mean duration. |
+| `EdgePredictor`          | Scores every machine–operation pair (default **bilinear**, optional dot-product). GraphNorm on both sides plus a learned ECT-style efficiency bias (`-expected_completion / mean_duration`). |
 | Critic                   | MLP on the pooled graph embedding → scalar *V*(*s*).                                                                                                                                                          |
 | `GraphActorCriticPolicy` | SB3 policy: encoder → masked categorical actor + critic. Dropout must be `0.0` so PPO likelihoods stay deterministic.                                                                                         |
 
@@ -264,7 +264,7 @@ python baseline_random.py --full-scale
 
 All hyperparameters live in `config.py` (`TrainConfig`, `EnvConfig`, `ModelConfig`, `PPOConfig`).
 
-**Checkpoint compatibility:** Resume still fingerprints the **training** env point size, model dims, and PPO batching — you cannot resume a `5×3×4` run as `25×15×8`. `--full-scale` writes `./checkpoints_full/` so demo zips under `./checkpoints/` are left alone.
+**Checkpoint compatibility:** Resume fingerprints the **training** env point size, model dims, and PPO batching — you cannot resume a `5×3×4` run as `25×15×8`, or a pre-FFN zip against the current encoder. Train those from scratch. `--full-scale` writes `./checkpoints_full/` so demo zips under `./checkpoints/` are left alone.
 
 **Size-agnostic inference (not mixed-size training).** The GNN has no weights tied to `n_machines` or `n_operations`. Gym `action_space` is dummy `Discrete(2)` (SB3's unused head); live arity is `n_machines * n_operations` on the graph, carried by `action_mask`. A zip trained at one point size can be evaluated at another:
 

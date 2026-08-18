@@ -10,6 +10,7 @@ from torch_geometric.data import HeteroData
 from config import ModelConfig
 from envs.fjsp_env import (
     FJSPEnv,
+    MACH_FEATURE_DIM,
     OP_FEATURE_DIM,
     make_sb3_action_space,
     make_sb3_graph_observation_space,
@@ -22,7 +23,7 @@ def _tiny_graph(n_machines: int = 2, n_ops: int = 2, efficiency: float = 1.0) ->
     g = HeteroData()
     g["operation"].x = torch.zeros((n_ops, OP_FEATURE_DIM), dtype=torch.float32)
     g["operation"].x[:, 0] = 4.0
-    g["machine"].x = torch.zeros((n_machines, 3), dtype=torch.float32)
+    g["machine"].x = torch.zeros((n_machines, MACH_FEATURE_DIM), dtype=torch.float32)
     # One compatible edge per (op, machine) with efficiency attr.
     edges = []
     attrs = []

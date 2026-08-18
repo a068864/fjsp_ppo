@@ -179,9 +179,10 @@ class PPOConfig:
     batch_size: int = 128
     n_epochs: int = 4
     ent_coef: float = 0.01
-    # Shared encoder: 0.5 let value MSE (~21 at init) drown the policy term.
-    vf_coef: float = 0.25
-    max_grad_norm: float = 2.0  # 0.5 bound every update on the 4-layer demo run
+    # Shared encoder: 0.5 drowned the policy; 0.25 still did on FFN+MLP
+    # (clip 2–5, KL ~1e-4, train Cmax flat). Critic keeps less of the clip budget.
+    vf_coef: float = 0.1
+    max_grad_norm: float = 5.0  # 2.0 clipped every FFN+MLP update; KL stayed ~1e-4
     total_timesteps: int = 1_000_000
     # Early-stop PPO epochs when approx KL exceeds this (None disables).
     # 0.05 never fired (max KL 0.041) so 8 epochs overfit the 512-sample rollout.
@@ -363,7 +364,7 @@ def get_debug_train_config() -> TrainConfig:
             batch_size=64,
             n_epochs=6,
             ent_coef=0.01,
-            vf_coef=0.25,
+            vf_coef=0.1,
             max_grad_norm=5.0,
             target_kl=0.02,
             total_timesteps=65_536,

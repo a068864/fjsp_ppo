@@ -114,9 +114,10 @@ class EdgePredictor(nn.Module):
         ).view(batch_size, n_operations, hidden)
         if self.predictor_type == "bilinear":
             scores = torch.matmul(torch.matmul(m, self.interaction_weight), o.transpose(-1, -2))
+            logits = scores.div(self.scale).reshape(batch_size, n_machines * n_operations)
         else:
             scores = torch.matmul(m, o.transpose(-1, -2))
-        logits = scores.div(self.scale).reshape(batch_size, n_machines * n_operations)
+            logits = scores.div(self.scale).reshape(batch_size, n_machines * n_operations)
         if efficiency is None:
             return logits
         eff = efficiency.to(device=logits.device, dtype=logits.dtype)
@@ -151,7 +152,7 @@ class EdgePredictor(nn.Module):
         return self._score_pair(machine_emb, operation_emb, efficiency)
 
     def reset_parameters(self) -> None:
-        """Reset efficiency bias and bilinear metric to the PPO-safe prior."""
+        """Reset efficiency bias and pair metric to the PPO-safe prior."""
         # Weak ECT residual (1.0 cloned greedy dispatch; GNN logits are ~0.7 std).
         nn.init.constant_(self.efficiency_scale, 0.1)
         if self.predictor_type == "bilinear":

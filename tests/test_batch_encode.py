@@ -163,6 +163,10 @@ def test_encoder_uses_multihead_transformer_and_reverse_relations():
     assert all(conv.edge_dim == 1 for conv in convs.values())
     assert all(conv.root_weight is False for conv in convs.values())
     assert all(reverse in convs for reverse in REVERSE_EDGE_TYPES.values())
+    ffn = enc.layers[0].ffn
+    assert isinstance(ffn[0], torch.nn.Linear)
+    assert ffn[0].out_features == 32 * 4
+    assert ffn[-1].out_features == 32
 
 
 def test_compatibility_edge_attributes_reach_operation_embeddings():

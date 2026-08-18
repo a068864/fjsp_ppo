@@ -11,6 +11,7 @@ import torch
 from envs.fjsp_env import (
     DEP_TYPE_ATTR,
     FJSPEnv,
+    MACH_FEATURE_DIM,
     MACH_IDLE_DURATION,
     MACH_QUEUE,
     MACH_WORKLOAD,
@@ -72,7 +73,7 @@ def _assert_graph_consistent(env: FJSPEnv, graph) -> None:
     assert torch.allclose(op_x, env.state["operation"].x)
     assert torch.allclose(mach_x, env.state["machine"].x)
     assert op_x.shape == (env.n_operations, OP_FEATURE_DIM)
-    assert mach_x.shape == (env.n_machines, 3)
+    assert mach_x.shape == (env.n_machines, MACH_FEATURE_DIM)
 
     scheduled = op_x[:, OP_SCHEDULED] > 0.5
     processing = op_x[:, OP_PROCESSING] > 0.5

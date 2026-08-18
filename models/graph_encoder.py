@@ -81,6 +81,14 @@ class HeteroResidualBlock(nn.Module):
         self.conv = HeteroConv(convs, aggr=aggr)
         self.norm_operation = nn.LayerNorm(hidden_dim)
         self.norm_machine = nn.LayerNorm(hidden_dim)
+        # 4H inner FFN on the same hop; last linear is 0 so init == LN residual.
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 4),
+            nn.GELU(),
+            nn.Linear(hidden_dim * 4, hidden_dim),
+        )
+        nn.init.zeros_(self.ffn[-1].weight)
+        nn.init.zeros_(self.ffn[-1].bias)
         self.dropout_layer = nn.Dropout(self.dropout)
 
     def forward(
@@ -134,6 +142,7 @@ class HeteroResidualBlock(nn.Module):
             else:
                 fused = self.norm_machine(fused)
             fused = F.gelu(fused)
+            fused = fused + self.ffn(fused)
             fused = self.dropout_layer(fused)
             updated[node_type] = fused
         return updated
