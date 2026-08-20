@@ -230,7 +230,7 @@ class TrainConfig:
 
     seed: int = 42
     n_envs: int = 8
-    deterministic_torch: bool = True
+    deterministic_torch: bool = False
     device: str = "auto"
     tensorboard_log: str = "./logs"
     checkpoint_dir: str = "./checkpoints"

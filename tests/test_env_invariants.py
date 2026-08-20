@@ -58,13 +58,16 @@ def test_sb3_space_graph_subspace_is_truthful():
     assert tuple(mask_space.shape) == (0,)
 
 
-def test_action_mask_is_not_shared_mutable_cache():
+def test_action_mask_cache_is_shared_until_invalidated():
     env = FJSPEnv(n_machines=3, n_jobs=2, avg_operations_per_job=2, seed=0, device="cpu")
     env.reset(seed=0)
     m1 = env.get_action_mask()
-    m1[:] = 0
     m2 = env.get_action_mask()
-    assert float(m2.sum()) > 0.0
+    assert m1 is m2
+    env._mark_lookahead_stale()
+    m3 = env.get_action_mask()
+    assert m3 is not m1
+    assert float(m3.sum()) > 0.0
     env.close()
 
 

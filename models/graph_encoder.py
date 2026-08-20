@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Dict, List, Tuple
 
 import torch
@@ -237,6 +238,30 @@ class GraphEncoder(nn.Module):
     def _module_device(self) -> torch.device:
         return self.operation_encoder[0].weight.device
 
+    @staticmethod
+    def _amp_context(device: torch.device):
+        """Mixed precision on CUDA/MPS; embeddings are cast back to fp32."""
+        if device.type not in ("cuda", "mps"):
+            return nullcontext()
+        try:
+            return torch.autocast(device_type=device.type)
+        except (RuntimeError, ValueError, TypeError):
+            return nullcontext()
+
+    @staticmethod
+    def _to_module_device(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
+        """Copy onto ``device``; clone when already there so convs cannot alias env storage."""
+        moved = tensor.to(device)
+        return moved if moved is not tensor else tensor.clone()
+
+    @staticmethod
+    def _fp32(
+        machine_emb: torch.Tensor,
+        operation_emb: torch.Tensor,
+        graph_emb: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return machine_emb.float(), operation_emb.float(), graph_emb.float()
+
     def _project_nodes(self, data: HeteroData) -> Dict[str, torch.Tensor]:
         if "operation" not in data.node_types or data["operation"].x is None:
             raise ValueError("HeteroData is missing operation node features")
@@ -431,27 +456,29 @@ class GraphEncoder(nn.Module):
         device = self._module_device()
         # Move local views only — never call data.to(device) in-place.
         local = HeteroData()
-        local["operation"].x = data["operation"].x.float().to(device)
-        local["machine"].x = data["machine"].x.float().to(device)
+        local["operation"].x = self._to_module_device(
+            data["operation"].x.float(), device
+        )
+        local["machine"].x = self._to_module_device(data["machine"].x.float(), device)
         for edge_type in EDGE_TYPES:
             if edge_type not in data.edge_types:
                 continue
             edge_index = data[edge_type].edge_index
             if edge_index is None or edge_index.numel() == 0:
                 continue
-            local[edge_type].edge_index = edge_index.to(device)
+            local[edge_type].edge_index = self._to_module_device(edge_index, device)
             edge_attr = getattr(data[edge_type], "edge_attr", None)
             if edge_attr is not None:
-                local[edge_type].edge_attr = edge_attr.to(device)
+                local[edge_type].edge_attr = self._to_module_device(edge_attr, device)
 
-        x_dict = self._project_nodes(local)
-        edge_index_dict, edge_attr_dict = self._message_edges(local)
-        x_dict = self._encode_x_dict(x_dict, edge_index_dict, edge_attr_dict)
-
-        operation_emb = x_dict["operation"]
-        machine_emb = x_dict["machine"]
-        graph_emb = self._pool_graph(operation_emb, machine_emb)
-        return machine_emb, operation_emb, graph_emb
+        with self._amp_context(device):
+            x_dict = self._project_nodes(local)
+            edge_index_dict, edge_attr_dict = self._message_edges(local)
+            x_dict = self._encode_x_dict(x_dict, edge_index_dict, edge_attr_dict)
+            operation_emb = x_dict["operation"]
+            machine_emb = x_dict["machine"]
+            graph_emb = self._pool_graph(operation_emb, machine_emb)
+        return self._fp32(machine_emb, operation_emb, graph_emb)
 
     def encode_batch(
         self, graphs: List[HeteroData]
@@ -481,31 +508,35 @@ class GraphEncoder(nn.Module):
                 raise
             return self._encode_serial(graphs)
 
-        x_dict = self._project_nodes(batch)
-        edge_index_dict, edge_attr_dict = self._message_edges(batch)
-        x_dict = self._encode_x_dict(x_dict, edge_index_dict, edge_attr_dict)
+        with self._amp_context(device):
+            x_dict = self._project_nodes(batch)
+            edge_index_dict, edge_attr_dict = self._message_edges(batch)
+            x_dict = self._encode_x_dict(x_dict, edge_index_dict, edge_attr_dict)
 
-        operation_emb = x_dict["operation"]
-        machine_emb = x_dict["machine"]
-        op_ptr = batch["operation"].ptr
-        mach_ptr = batch["machine"].ptr
-        n_graph = len(graphs)
-        graph_emb_batch = self.graph_mlp(
-            torch.cat(
-                [
-                    self.operation_pool(
-                        operation_emb,
-                        index=batch["operation"].batch,
-                        dim_size=n_graph,
-                    ),
-                    self.machine_pool(
-                        machine_emb,
-                        index=batch["machine"].batch,
-                        dim_size=n_graph,
-                    ),
-                ],
-                dim=-1,
+            operation_emb = x_dict["operation"]
+            machine_emb = x_dict["machine"]
+            op_ptr = batch["operation"].ptr
+            mach_ptr = batch["machine"].ptr
+            n_graph = len(graphs)
+            graph_emb_batch = self.graph_mlp(
+                torch.cat(
+                    [
+                        self.operation_pool(
+                            operation_emb,
+                            index=batch["operation"].batch,
+                            dim_size=n_graph,
+                        ),
+                        self.machine_pool(
+                            machine_emb,
+                            index=batch["machine"].batch,
+                            dim_size=n_graph,
+                        ),
+                    ],
+                    dim=-1,
+                )
             )
+        operation_emb, machine_emb, graph_emb_batch = self._fp32(
+            operation_emb, machine_emb, graph_emb_batch
         )
         machine_list = [
             machine_emb[mach_ptr[i] : mach_ptr[i + 1]] for i in range(n_graph)

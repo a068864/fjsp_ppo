@@ -31,6 +31,17 @@ def test_use_subprocess_cpu_vs_flags():
     assert _use_subprocess(cfg, parse_args(["--subproc"])) is False
 
 
+def test_parse_args_deterministic_flag():
+    from config import get_debug_train_config
+    from train import apply_args, parse_args
+
+    assert parse_args(["--deterministic"]).deterministic is True
+    assert parse_args([]).deterministic is False
+    cfg = apply_args(get_debug_train_config(), parse_args(["--deterministic"]))
+    assert cfg.deterministic_torch is True
+    assert get_debug_train_config().deterministic_torch is False
+
+
 def test_process_rss_bytes_is_positive():
     from training.benchmark import process_rss_bytes
 

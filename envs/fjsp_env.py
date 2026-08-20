@@ -475,8 +475,6 @@ class FJSPEnv(gym.Env):
             to_op = int(self.np_rng.choice(eligible_targets))
             if _try_add(from_op, to_op, "cross_job"):
                 added_cross_deps += 1
-                pair_deps.append((from_op, to_op))
-                op_order = self._get_topological_order(pair_deps, all_ops)
 
         return deps
 
@@ -1003,10 +1001,14 @@ class FJSPEnv(gym.Env):
         return elig.T.reshape(-1).to(dtype=torch.float32).detach().cpu().numpy()
 
     def get_action_mask(self) -> np.ndarray:
-        """Return a float32 mask of shape ``(n_actions,)`` with 1 = valid."""
+        """Return a float32 mask of shape ``(n_actions,)`` with 1 = valid.
+
+        The array is the env cache (no copy). Mutating it mutates the next
+        ``get_action_mask()`` until the graph changes and the cache is rebuilt.
+        """
         if self._cached_action_mask is None:
             self._cached_action_mask = self._compute_action_mask()
-        return np.array(self._cached_action_mask, copy=True)
+        return self._cached_action_mask
 
     def get_eligible_machines(self, operation: int) -> List[int]:
         """Get list of eligible machines for a given operation."""
@@ -1052,9 +1054,10 @@ class FJSPEnv(gym.Env):
                 if edge_attr is not None:
                     out[edge_type].edge_attr = edge_attr[keep].contiguous()
                 continue
-            out[edge_type].edge_index = edge_index.clone()
+            # Edges are rebound, not mutated in-place; share storage with env.state.
+            out[edge_type].edge_index = edge_index
             if edge_attr is not None:
-                out[edge_type].edge_attr = edge_attr.clone()
+                out[edge_type].edge_attr = edge_attr
         return out
 
     def _get_obs(self) -> Dict[str, Any]:

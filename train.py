@@ -72,6 +72,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Force GraphSubprocVecEnv when n_envs > 1 (default on CPU)",
     )
     parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Enable deterministic PyTorch (slower; default is off for throughput)",
+    )
+    parser.add_argument(
         "--n-machines",
         type=int,
         default=None,
@@ -109,6 +114,8 @@ def apply_args(cfg: TrainConfig, args: argparse.Namespace) -> TrainConfig:
         cfg.resume = False
     if getattr(args, "trust_checkpoint", False):
         cfg.trust_checkpoint = True
+    if getattr(args, "deterministic", False):
+        cfg.deterministic_torch = True
     if args.n_machines is not None:
         cfg.env.n_machines = int(args.n_machines)
     if args.n_jobs is not None:
