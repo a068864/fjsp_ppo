@@ -172,7 +172,7 @@ class FJSPEnv(gym.Env):
             n_machines: Number of available machines.
             n_jobs: Number of jobs in the scheduling problem.
             avg_operations_per_job: Average operations per job.
-            time_penalty: Penalty for time consumption.
+            time_penalty: Scale on classic Cmax deltas (negative).
             max_operation_duration: Maximum duration of an operation.
             connection_drop_prob: Probability of dropping machine-operation connections.
             compatible_efficiency_std: Standard deviation for machine efficiency.
@@ -1359,13 +1359,13 @@ class FJSPEnv(gym.Env):
         return float(self.current_time) + max(max_wl, max_cp, work_lb)
 
     def failure_penalty(self) -> float:
-        """Return worse than serial processing at max duration and slowdown."""
+        """Worse than serial classic Cmax at max duration and 1.5 slowdown."""
         return (
             float(self.time_penalty)
             * float(self.n_operations)
             * float(self.max_operation_duration)
-            * float(self.time_step)
-            * 4.0
+            * 1.5
+            * 2.0
         )
 
     def _completion_delta_reward(self, before: float, after: float) -> float:
@@ -1403,14 +1403,14 @@ class FJSPEnv(gym.Env):
         self._cached_action_mask = None
         self._episode_steps += 1
 
-        before = self.estimated_completion()
+        before_cmax = float(self._classic_cmax)
         self.schedule_operation(machine, operation)
+        reward = self._completion_delta_reward(before_cmax, self._classic_cmax)
 
         processing_ops, blocked_machines = self._get_processing_operations()
         if self._is_gridlock(processing_ops, blocked_machines):
             # Still advance the clock so makespan/time stay consistent, then terminate.
             self._advance_clock(float(self.time_step))
-            reward = self._completion_delta_reward(before, self.estimated_completion())
             reward += self.failure_penalty()
             self.last_success = False
             self.makespan = float("inf")
@@ -1420,7 +1420,6 @@ class FJSPEnv(gym.Env):
             return obs, float(reward), True, False, info
 
         self._apply_processing_work(1, processing_ops)
-        reward = self._completion_delta_reward(before, self.estimated_completion())
 
         # Detect gridlock after the tick (e.g. newly blocked fronts).
         processing_ops, blocked_machines = self._get_processing_operations()
@@ -1459,37 +1458,33 @@ class FJSPEnv(gym.Env):
         """Simulate remaining execution under FIFO queue assumption.
 
         Jumps to the next completion event; each jump equals the same number of
-        fixed ``time_step`` ticks ``step`` would have applied.
+        fixed ``time_step`` ticks ``step`` would have applied. Classic Cmax
+        is already final once every op is assigned, so this adds no reward.
         """
-        reward = 0.0
         guard = 0
         max_ticks = max(10_000, int(self.n_operations * self.max_operation_duration * 4) + 1)
-        after = self.estimated_completion()
 
         while True:
             op_features = self.state["operation"].x
             if bool(torch.all(op_features[:, OP_FINISHED] > 0.5).item()):
-                return reward, True
+                return 0.0, True
 
             proc_edges = self.state["machine", "processing", "operation"].edge_index
             if proc_edges.numel() == 0:
-                return reward, False
+                return 0.0, False
 
             processing_ops, _blocked = self._get_processing_operations()
             if not bool(processing_ops.any().item()):
-                return reward, False
+                return 0.0, False
             if guard >= max_ticks:
-                return reward, False
+                return 0.0, False
 
             k = min(self._ticks_to_next_completion(processing_ops), max_ticks - guard)
             k = max(1, k)
-            before = after
             self._apply_processing_work(k, processing_ops)
-            after = self.estimated_completion()
-            reward += self._completion_delta_reward(before, after)
             guard += k
             if guard > max_ticks:
-                return reward, False
+                return 0.0, False
 
     def terminal(self) -> bool:
         """Return True when every operation has left the initial state."""

@@ -259,19 +259,16 @@ def test_rollout_matches_repeated_tick_advance():
 
     env.state = snapshot.clone()
     env.current_time = t0
-    r_ticks = 0.0
     for _ in range(100):
         if bool(torch.all(env.state["operation"].x[:, OP_FINISHED] > 0.5)):
             break
         processing, blocked = env._get_processing_operations()
         if not processing.any():
             break
-        before = env.estimated_completion()
         env._advance_time_tick()
-        r_ticks += env._completion_delta_reward(before, env.estimated_completion())
     success_ticks = bool(torch.all(env.state["operation"].x[:, OP_FINISHED] > 0.5))
     assert success_rollout == success_ticks
-    assert r_rollout == pytest.approx(r_ticks, abs=1e-5)
+    assert r_rollout == pytest.approx(0.0)
     assert time_rollout == pytest.approx(env.current_time, abs=1e-5)
     env.close()
 

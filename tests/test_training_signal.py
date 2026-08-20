@@ -31,13 +31,13 @@ def test_debug_ppo_uses_full_horizon_gae_and_low_entropy():
     assert cfg.lr_end_fraction == pytest.approx(0.8)
 
 
-def test_nonterminal_step_reward_tracks_completion_bound():
+def test_nonterminal_step_reward_tracks_classic_cmax():
     env = FJSPEnv(n_machines=3, n_jobs=2, avg_operations_per_job=2, seed=0, device="cpu")
     env.reset(seed=0)
-    before = env.estimated_completion()
+    before = float(env._classic_cmax)
     action = int(np.flatnonzero(env.get_action_mask())[0])
     _obs, reward, terminated, truncated, info = env.step(action)
-    after = env.estimated_completion()
+    after = float(env._classic_cmax)
     expected = float(env.time_penalty) * (after - before)
     if terminated or truncated:
         if not info.get("success"):
@@ -54,7 +54,6 @@ def test_failure_penalty_worse_than_serial_success_bound():
         n_machines=2,
         n_jobs=2,
         avg_operations_per_job=2,
-        time_step=4.0,
         seed=0,
         device="cpu",
     )
@@ -62,7 +61,6 @@ def test_failure_penalty_worse_than_serial_success_bound():
         float(env.time_penalty)
         * float(env.n_operations)
         * float(env.max_operation_duration)
-        * float(env.time_step)
         * 1.5
     )
     assert env.failure_penalty() < worst_success
@@ -126,7 +124,7 @@ def test_reset_estimated_completion_uses_critical_path():
 
 
 def test_successful_episode_logs_classic_makespan_not_clock(monkeypatch):
-    """Logged makespan is earliest-start Cmax; the PPO reward stays the bound delta."""
+    """Logged makespan is earliest-start Cmax; PPO reward is the Cmax delta."""
     from solvers.milp import decode_assignment_schedule as decode_oracle
     from solvers.milp import extract_fjsp_instance
 
@@ -138,10 +136,10 @@ def test_successful_episode_logs_classic_makespan_not_clock(monkeypatch):
     env = FJSPEnv(n_machines=3, n_jobs=2, avg_operations_per_job=2, seed=0, device="cpu")
     obs, _ = env.reset(seed=0)
     instance = extract_fjsp_instance(env)
-    before = env.estimated_completion()
+    before = float(env._classic_cmax)
     action = int(np.flatnonzero(obs["action_mask"])[0])
     obs, first_reward, terminated, truncated, _info = env.step(action)
-    after = env.estimated_completion()
+    after = float(env._classic_cmax)
     if not (terminated or truncated):
         assert float(first_reward) == pytest.approx(
             float(env.time_penalty) * (after - before), abs=1e-5
@@ -196,9 +194,11 @@ def test_logged_makespan_is_running_classic_cmax(monkeypatch):
 
     info = {}
     done = False
+    ep_return = 0.0
     for op in range(2):
         action = op * env.n_operations + op
-        _obs, _r, terminated, truncated, info = env.step(action)
+        _obs, reward, terminated, truncated, info = env.step(action)
+        ep_return += float(reward)
         done = bool(terminated or truncated)
     assert done
     assert info.get("success")
@@ -206,4 +206,5 @@ def test_logged_makespan_is_running_classic_cmax(monkeypatch):
     assert info["makespan"] == pytest.approx(2.0)
     assert info["makespan"] == pytest.approx(decoded.makespan)
     assert decoded.makespan <= env.current_time + 1e-6
+    assert ep_return == pytest.approx(float(env.time_penalty) * 2.0)
     env.close()

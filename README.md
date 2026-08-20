@@ -7,7 +7,7 @@ Deep Reinforcement Learning for **Flexible Job Shop Scheduling (FJSP)** using:
 - Gymnasium
 - CUDA / Apple Metal (MPS), with CPU fallback
 
-The environment state is a PyTorch Geometric `HeteroData` graph. A custom SB3 policy encodes the graph with heterogeneous convolutions, scores machine–operation pairs with an `EdgePredictor` (including compatibility efficiency), and masks invalid actions with `-1e9` before sampling. The agent is **constructive**: each `step()` assigns one eligible `(machine, operation)` pair until every operation is scheduled. Training uses a lower-bound reward; evaluation and baselines report classic earliest-start $C_{\mathrm{max}}$.
+The environment state is a PyTorch Geometric `HeteroData` graph. A custom SB3 policy encodes the graph with heterogeneous convolutions, scores machine–operation pairs with an `EdgePredictor` (including compatibility efficiency), and masks invalid actions with `-1e9` before sampling. The agent is **constructive**: each `step()` assigns one eligible `(machine, operation)` pair until every operation is scheduled. Training reward is `time_penalty × Δ` of running earliest-start $C_{\mathrm{max}}$ (the same metric evaluation and baselines report).
 
 **Supported Python:** 3.10–3.13.
 
@@ -104,7 +104,7 @@ Action encoding: `action = machine_id * n_operations + operation_id`.
 
 **Discrete ticks.** After each assignment the clock advances by a fixed `time_step`. Only actual processed work is subtracted from remaining durations / machine workload; unused fractional tick capacity is **not** transferred to the next queued operation in the same tick. Terminal `rollout()` uses the same tick routine under a FIFO queue assumption.
 
-**Training reward vs eval $C_{\mathrm{max}}$.** PPO sees a shaped signal: `time_penalty × Δ` of a makespan **lower bound** (clock + max of longest machine workload, remaining critical path, and remaining work / machines). Failures add a large penalty. Evaluation does **not** score the env tick clock. It reconstructs earliest-start $C_{\mathrm{max}}$ from the inferred `(op, machine)` sequence — the same metric as the random, heuristic, MILP, and LP-rounding baselines.
+**Training reward vs eval $C_{\mathrm{max}}$.** PPO sees `time_penalty × Δ` of running earliest-start $C_{\mathrm{max}}$ (updated on each assignment; FIFO `rollout()` adds nothing). Packing into idle is 0; extending the current peak is negative. Failures add a large penalty. Evaluation reports that same classic $C_{\mathrm{max}}$ — the same metric as the random, heuristic, MILP, and LP-rounding baselines. The env tick clock is only a simulator; it is not the training objective.
 
 ---
 
