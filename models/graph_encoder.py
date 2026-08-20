@@ -7,7 +7,6 @@ from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch_geometric.data import Batch, HeteroData
 from torch_geometric.nn import AttentionalAggregation, HeteroConv, TransformerConv
 
@@ -47,7 +46,12 @@ MESSAGE_EDGE_TYPES = EDGE_TYPES + list(REVERSE_EDGE_TYPES.values())
 
 
 class HeteroResidualBlock(nn.Module):
-    """Edge-aware heterogeneous TransformerConv layer with residual normalization."""
+    """Pre-LN heterogeneous TransformerConv + type-specific residual FFN.
+
+    Post-act on the skip path (LN → GELU → residual) squashed early-hop
+    features on 8-op DAGs. LayerScale starts small so extra layers do not
+    blow up PPO KL at init. Last FFN linear is zero so the FFN is identity.
+    """
 
     def __init__(
         self,
@@ -55,15 +59,20 @@ class HeteroResidualBlock(nn.Module):
         num_heads: int = 4,
         dropout: float = 0.1,
         aggr: str = "sum",
+        layer_scale: float = 0.1,
+        edge_dim: int = 1,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
         self.dropout = float(dropout)
+        self.edge_dim = int(edge_dim)
 
         if hidden_dim % num_heads != 0:
             raise ValueError(
                 f"hidden_dim ({hidden_dim}) must be divisible by num_heads ({num_heads})"
             )
+        if self.edge_dim <= 0:
+            raise ValueError(f"edge_dim must be positive, got {self.edge_dim}")
 
         convs: Dict[Tuple[str, str, str], nn.Module] = {}
         for edge_type in MESSAGE_EDGE_TYPES:
@@ -75,22 +84,51 @@ class HeteroResidualBlock(nn.Module):
                 heads=num_heads,
                 concat=True,
                 dropout=self.dropout,
-                edge_dim=1,
+                edge_dim=self.edge_dim,
                 root_weight=False,
             )
 
         self.conv = HeteroConv(convs, aggr=aggr)
         self.norm_operation = nn.LayerNorm(hidden_dim)
         self.norm_machine = nn.LayerNorm(hidden_dim)
-        # 4H inner FFN on the same hop; last linear is 0 so init == LN residual.
-        self.ffn = nn.Sequential(
+        self.ffn_norm_operation = nn.LayerNorm(hidden_dim)
+        self.ffn_norm_machine = nn.LayerNorm(hidden_dim)
+        self.ffn_operation = self._make_ffn(hidden_dim)
+        self.ffn_machine = self._make_ffn(hidden_dim)
+        scale = torch.full((hidden_dim,), float(layer_scale))
+        self.attn_scale_operation = nn.Parameter(scale.clone())
+        self.attn_scale_machine = nn.Parameter(scale.clone())
+        self.ffn_scale_operation = nn.Parameter(scale.clone())
+        self.ffn_scale_machine = nn.Parameter(scale.clone())
+        self.dropout_layer = nn.Dropout(self.dropout)
+
+    @staticmethod
+    def _make_ffn(hidden_dim: int) -> nn.Sequential:
+        ffn = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 4),
             nn.GELU(),
             nn.Linear(hidden_dim * 4, hidden_dim),
         )
-        nn.init.zeros_(self.ffn[-1].weight)
-        nn.init.zeros_(self.ffn[-1].bias)
-        self.dropout_layer = nn.Dropout(self.dropout)
+        nn.init.zeros_(ffn[-1].weight)
+        nn.init.zeros_(ffn[-1].bias)
+        return ffn
+
+    def _node_mods(self, node_type: str):
+        if node_type == "operation":
+            return (
+                self.norm_operation,
+                self.ffn_norm_operation,
+                self.ffn_operation,
+                self.attn_scale_operation,
+                self.ffn_scale_operation,
+            )
+        return (
+            self.norm_machine,
+            self.ffn_norm_machine,
+            self.ffn_machine,
+            self.attn_scale_machine,
+            self.ffn_scale_machine,
+        )
 
     def forward(
         self,
@@ -112,39 +150,36 @@ class HeteroResidualBlock(nn.Module):
             and edge_index.size(0) == 2
         }
 
+        pre_norm: Dict[str, torch.Tensor] = {}
+        for node_type in ("operation", "machine"):
+            if node_type not in residual:
+                continue
+            norm, _, _, _, _ = self._node_mods(node_type)
+            pre_norm[node_type] = norm(residual[node_type])
+
         if filtered_edges:
             filtered_attrs = {
                 edge_type: edge_attr_dict[edge_type]
                 for edge_type in filtered_edges
             }
             out = self.conv(
-                x_dict,
+                pre_norm,
                 filtered_edges,
                 edge_attr_dict=filtered_attrs,
             )
         else:
-            out = {key: value for key, value in x_dict.items()}
+            out = {}
 
         updated: Dict[str, torch.Tensor] = {}
         for node_type in ("operation", "machine"):
             if node_type not in residual:
                 continue
+            _, ffn_norm, ffn, attn_scale, ffn_scale = self._node_mods(node_type)
             message = out.get(node_type) if filtered_edges else None
-            if (
-                message is not None
-                and message.shape == residual[node_type].shape
-            ):
-                fused = residual[node_type] + message
-            else:
-                # No real message for this type — keep residual (avoid 2x features).
-                fused = residual[node_type]
-            if node_type == "operation":
-                fused = self.norm_operation(fused)
-            else:
-                fused = self.norm_machine(fused)
-            fused = F.gelu(fused)
-            fused = fused + self.ffn(fused)
-            fused = self.dropout_layer(fused)
+            fused = residual[node_type]
+            if message is not None and message.shape == fused.shape:
+                fused = fused + self.dropout_layer(message) * attn_scale
+            fused = fused + self.dropout_layer(ffn(ffn_norm(fused))) * ffn_scale
             updated[node_type] = fused
         return updated
 
@@ -153,8 +188,9 @@ class GraphEncoder(nn.Module):
     """Encode FJSP ``HeteroData`` into machine, operation, and graph embeddings.
 
     Architecture:
-        Linear input projections -> edge-aware bidirectional TransformerConv
-        blocks -> attentional pooling over operations and machines -> graph MLP.
+        Linear input projections -> edge-attr lift -> pre-LN bidirectional
+        TransformerConv blocks (type-specific FFN, LayerScale) -> attentional
+        pooling over operations and machines -> graph MLP.
 
     Args:
         operation_in_dim: Operation node feature dimension (default 12).
@@ -199,6 +235,9 @@ class GraphEncoder(nn.Module):
             nn.GELU(),
             nn.Dropout(self.dropout),
         )
+        # Dep-type scalars (1/2/3) and efficiency share one lift; each
+        # TransformerConv still has its own edge projection.
+        self.edge_lift = nn.Linear(1, hidden_dim)
 
         self.layers = nn.ModuleList(
             [
@@ -206,6 +245,7 @@ class GraphEncoder(nn.Module):
                     hidden_dim=hidden_dim,
                     num_heads=num_heads,
                     dropout=dropout,
+                    edge_dim=hidden_dim,
                 )
                 for _ in range(self.num_layers)
             ]
@@ -363,6 +403,7 @@ class GraphEncoder(nn.Module):
                             f"{edge_type} edge_attr must have one feature, "
                             f"got {edge_attr.size(1)}"
                         )
+            edge_attr = self.edge_lift(edge_attr)
             edge_index_dict[edge_type] = edge_index
             edge_attr_dict[edge_type] = edge_attr
             reverse_type = REVERSE_EDGE_TYPES[edge_type]

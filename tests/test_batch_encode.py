@@ -180,13 +180,29 @@ def test_encoder_uses_multihead_transformer_and_reverse_relations():
     convs = enc.layers[0].conv.convs
     assert all(isinstance(conv, TransformerConv) for conv in convs.values())
     assert all(conv.heads == 4 for conv in convs.values())
-    assert all(conv.edge_dim == 1 for conv in convs.values())
+    assert all(conv.edge_dim == 32 for conv in convs.values())
     assert all(conv.root_weight is False for conv in convs.values())
     assert all(reverse in convs for reverse in REVERSE_EDGE_TYPES.values())
-    ffn = enc.layers[0].ffn
+    ffn = enc.layers[0].ffn_operation
     assert isinstance(ffn[0], torch.nn.Linear)
     assert ffn[0].out_features == 32 * 4
     assert ffn[-1].out_features == 32
+    assert torch.equal(ffn[-1].weight, torch.zeros_like(ffn[-1].weight))
+    machine_ffn = enc.layers[0].ffn_machine
+    assert machine_ffn[0].out_features == 32 * 4
+    assert enc.edge_lift.in_features == 1
+    assert enc.edge_lift.out_features == 32
+    assert enc.layers[0].attn_scale_operation.shape == (32,)
+
+
+def test_ffn_is_identity_at_init():
+    enc = GraphEncoder(hidden_dim=16, num_layers=1, num_heads=2, dropout=0.0)
+    x = torch.randn(5, 16)
+    with torch.no_grad():
+        op_delta = enc.layers[0].ffn_operation(enc.layers[0].ffn_norm_operation(x))
+        mach_delta = enc.layers[0].ffn_machine(enc.layers[0].ffn_norm_machine(x))
+    assert torch.allclose(op_delta, torch.zeros_like(op_delta))
+    assert torch.allclose(mach_delta, torch.zeros_like(mach_delta))
 
 
 def test_compatibility_edge_attributes_reach_operation_embeddings():

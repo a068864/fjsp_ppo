@@ -86,12 +86,17 @@ def test_full_scale_train_config_geometry_and_batching():
     assert cfg.env.n_jobs == 15
     assert cfg.env.avg_operations_per_job == 8
     assert cfg.model.hidden_dim == 128
-    assert cfg.model.num_heads == 4
+    assert cfg.model.num_layers == 4
+    assert cfg.model.num_heads == 8
     assert cfg.n_envs == 8
     assert cfg.n_eval_episodes == 20
     assert cfg.eval_freq_updates == 8
     assert cfg.checkpoint_freq_updates == 8
     assert cfg.ppo.n_steps == 512
+    assert cfg.ppo.batch_size == 256
+    assert cfg.ppo.ent_coef == 0.02
+    assert cfg.ppo.target_kl == 0.015
+    assert cfg.lr_end_fraction == 0.3
     assert cfg.ppo.total_timesteps == 2_097_152
     assert cfg.ppo.total_timesteps & (cfg.ppo.total_timesteps - 1) == 0
     assert cfg.checkpoint_dir == "./checkpoints_full"

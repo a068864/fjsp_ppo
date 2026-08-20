@@ -132,8 +132,9 @@ class ModelConfig:
     """Graph encoder and actor-critic hyperparameters."""
 
     hidden_dim: int = 128
-    num_layers: int = 3
-    num_heads: int = 4
+    # 3 hops cannot cover 8-op job chains + cross-job DAG; LayerScale keeps 4 safe.
+    num_layers: int = 4
+    num_heads: int = 8
     dropout: float = 0.0
     predictor_type: Literal["dot_product", "bilinear"] = "bilinear"
     operation_in_dim: int = 12
@@ -176,9 +177,11 @@ class PPOConfig:
     gae_lambda: float = 1.0  # undiscounted finite-horizon makespan; λ<1 hides early assignments
     clip_range: float = 0.2
     n_steps: int = 2048
-    batch_size: int = 128
+    batch_size: int = 256
     n_epochs: int = 4
-    ent_coef: float = 0.01
+    # worker_0.monitor: Cmax 241→132 by ep ~250 then 132→142 while reward kept
+    # rising and Cmax std 54→15 — entropy collapsed onto the LB, not classic Cmax.
+    ent_coef: float = 0.02
     # Shared encoder: 0.5 drowned the policy; 0.25 still did on FFN+MLP
     # (clip 2–5, KL ~1e-4, train Cmax flat). Critic keeps less of the clip budget.
     vf_coef: float = 0.1
@@ -186,7 +189,8 @@ class PPOConfig:
     total_timesteps: int = 1_000_000
     # Early-stop PPO epochs when approx KL exceeds this (None disables).
     # 0.05 never fired (max KL 0.041) so 8 epochs overfit the 512-sample rollout.
-    target_kl: float = 0.02
+    # 0.015 cuts the last epoch once the 4096-sample full-scale update starts drifting.
+    target_kl: float = 0.015
 
     def __post_init__(self) -> None:
         self.validate()
@@ -243,7 +247,8 @@ class TrainConfig:
     eval_seed: Optional[int] = None
     best_metric: Literal["mean_reward", "mean_makespan"] = "mean_makespan"
     lr_schedule: Literal["constant", "linear"] = "linear"
-    lr_end_fraction: float = 0.1
+    # 0.1 starved late updates after the Cmax trough; keep ~30% of peak LR.
+    lr_end_fraction: float = 0.3
     resume: bool = False
     trust_checkpoint: bool = False
     env: EnvConfig = field(default_factory=EnvConfig)
@@ -381,8 +386,26 @@ def get_full_scale_train_config() -> TrainConfig:
         eval_freq_updates=8,
         checkpoint_dir="./checkpoints_full",
         tensorboard_log="./logs_full",
+        lr_schedule="linear",
+        lr_end_fraction=0.3,
         env=replace(FULL_SCALE_ENV),
-        ppo=PPOConfig(n_steps=512, total_timesteps=2_097_152),
+        model=ModelConfig(
+            hidden_dim=128,
+            num_layers=4,
+            num_heads=8,
+            critic_hidden_dim=256,
+        ),
+        ppo=PPOConfig(
+            learning_rate=1e-4,
+            n_steps=512,
+            batch_size=256,
+            n_epochs=4,
+            ent_coef=0.02,
+            vf_coef=0.1,
+            max_grad_norm=5.0,
+            target_kl=0.015,
+            total_timesteps=2_097_152,
+        ),
     )
 
 
