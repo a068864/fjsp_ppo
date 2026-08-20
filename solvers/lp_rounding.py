@@ -40,7 +40,6 @@ class LpRoundingResult:
     status: str
     lp_lower_bound: float
     makespan: float
-    lp_ratio: float
     fractional_assignment: Dict[int, Dict[int, float]]
     assignment: Optional[Tuple[Tuple[int, int], ...]] = None
     starts: Optional[Tuple[float, ...]] = None
@@ -99,7 +98,6 @@ def _failed_rounding(
         status=lp.status,
         lp_lower_bound=float(lp.lp_lower_bound),
         makespan=float("inf"),
-        lp_ratio=float("inf"),
         fractional_assignment=lp.fractional_assignment,
         assignment=None,
         starts=None,
@@ -113,14 +111,6 @@ def _failed_rounding(
         lp_status=lp.status,
         rule_makespans=(),
     )
-
-
-def _lp_ratio(makespan: float, lb: float, *, tol: float = LP_TOL) -> float:
-    if not (np.isfinite(makespan) and np.isfinite(lb)):
-        return float("inf")
-    if lb <= tol:
-        return float("inf")
-    return float(makespan / lb)
 
 
 def solve_lp_relaxation(
@@ -402,7 +392,6 @@ def solve_lp_rounding(
         status="Feasible",
         lp_lower_bound=float(lp.lp_lower_bound),
         makespan=float(best_sched.makespan),
-        lp_ratio=_lp_ratio(float(best_sched.makespan), float(lp.lp_lower_bound), tol=tol),
         fractional_assignment=lp.fractional_assignment,
         assignment=best_sched.assignment,
         starts=best_sched.starts,

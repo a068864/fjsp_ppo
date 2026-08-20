@@ -199,7 +199,6 @@ def test_end_to_end_rounding_feasible_and_above_lb():
     assert validate_milp_schedule(instance, result.as_schedule()) == []
     assert result.makespan == pytest.approx(5.0)
     assert result.lp_lower_bound <= result.makespan + 1e-6
-    assert result.lp_ratio == pytest.approx(result.makespan / result.lp_lower_bound)
     by_rule = dict(result.rule_makespans)
     assert set(by_rule) == {"LRPT", "CP"}
     assert min(by_rule.values()) == pytest.approx(result.makespan)

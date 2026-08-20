@@ -32,7 +32,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Evaluate FJSP with an LP relaxation + rounding/list-scheduling "
-            "baseline (not a proven approximation algorithm)"
+            "baseline"
         ),
     )
     parser.add_argument(
@@ -82,13 +82,12 @@ def print_lp_episode_table(
     compare_milp: bool = False,
     verbose: bool = False,
 ) -> None:
-    """Print per-instance LP bound, feasible Cmax, and empirical ratio."""
+    """Print per-instance LP bound and feasible Cmax."""
     headers = [
         "ep",
         "seed",
         "LB_LP",
         "Cmax",
-        "Cmax/LB",
         "sec",
         "trials",
         "rule",
@@ -99,7 +98,6 @@ def print_lp_episode_table(
         headers.extend(["frac", "viol", "assign"])
     print("-" * 72)
     print("Per-instance LP relaxation + rounded schedule")
-    print("Cmax/LB is an empirical ratio on this instance, not an approximation factor.")
     print(" ".join(f"{h:>10}" for h in headers))
     for rec in records:
         cells: List[str] = [
@@ -107,7 +105,6 @@ def print_lp_episode_table(
             f"{rec.seed:10d}",
             _fmt(rec.lp_lower_bound),
             _fmt(rec.makespan),
-            _fmt(rec.lp_ratio),
             _fmt(rec.runtime_s, prec=4),
             f"{rec.rounding_trials:10d}",
             f"{rec.best_rule:>10}",

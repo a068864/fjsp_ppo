@@ -342,7 +342,6 @@ class LpEpisodeRecord:
     seed: int
     lp_lower_bound: float
     makespan: float
-    lp_ratio: float
     runtime_s: float
     rounding_trials: int
     best_rule: str
@@ -462,7 +461,6 @@ def evaluate_lp_rounding_fjsp(
                 seed=ep_seed,
                 lp_lower_bound=float(lp_res.lp_lower_bound),
                 makespan=float(lp_res.makespan),
-                lp_ratio=float(lp_res.lp_ratio),
                 runtime_s=float(runtime_s),
                 rounding_trials=int(rounding_trials),
                 best_rule=str(lp_res.best_rule or ""),

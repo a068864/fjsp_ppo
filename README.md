@@ -352,7 +352,7 @@ Demo-scale instances are the intended target; larger instances may need `--time-
 
 ## LP-rounding baseline (relaxation + heuristic)
 
-Offline assignment LP + rounding + insertion list scheduling on each held-out instance (`eval_seed + episode_index`). Same eligibility, `duration × efficiency` processing times, and `precede` DAG as the MILP. This is **not** a proven approximation algorithm.
+Offline assignment LP + rounding + insertion list scheduling on each held-out instance (`eval_seed + episode_index`). Same eligibility, `duration × efficiency` processing times, and `precede` DAG as the MILP.
 
 **LP relaxation** (PuLP+CBC, continuous). Minimize `Cmax` with:
 
@@ -367,7 +367,7 @@ Integer assignment `x ∈ {0,1}` is relaxed to `[0,1]`. Exact disjunctive sequen
 
 **List scheduling.** Each integral assignment is decoded with insertion list scheduling (ready ops only; earliest feasible gap on the assigned machine, not append-only). Reconstruction tries `LRPT` and `CP` and keeps the lowest classic $C_{\mathrm{max}}$ — the same earliest-start objective as MILP / eval.
 
-`baseline_lp.py` prints per-instance `LB_LP`, feasible $C_{\mathrm{max}}$, and the empirical ratio $C_{\mathrm{max}} / LB_{\mathrm{LP}}$ (not a proven approximation factor). The sandwich is `LB_LP ≤ OPT ≤ C_max`. `compare_baselines.py` reports only the same columns as the other methods (makespan, std, success, episode length, ms/ep).
+`baseline_lp.py` prints per-instance `LB_LP` and feasible $C_{\mathrm{max}}$. `compare_baselines.py` reports only the same columns as the other methods (makespan, std, success, episode length, ms/ep).
 
 CBC is used as an LP solver. Same instance + seed + trials + PuLP/CBC version is deterministic given fixed variable order; alternative optimal bases can still yield different fractional `x` with the same `LB_LP`.
 
@@ -382,7 +382,7 @@ python baseline_lp.py --time-limit 30 --n-machines 5 --n-jobs 3 --avg-ops 4
 
 ## PPO vs all baselines
 
-Same held-out stream (`--seed`, env size) for PPO, random, every dispatching rule, MILP, and LP-rounding. The table uses the same columns for every method. LP reconstruction is listed as `LP-LRPT` and `LP-CP` (both always shown). LP bound / ratio columns are only in `baseline_lp.py`.
+Same held-out stream (`--seed`, env size) for PPO, random, every dispatching rule, MILP, and LP-rounding. The table uses the same columns for every method. LP reconstruction is listed as `LP-LRPT` and `LP-CP` (both always shown). LP bound columns are only in `baseline_lp.py`.
 
 ```bash
 python compare_baselines.py --trust-checkpoint
