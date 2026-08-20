@@ -234,6 +234,9 @@ class GraphEncoder(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
         )
 
+    def _module_device(self) -> torch.device:
+        return self.operation_encoder[0].weight.device
+
     def _project_nodes(self, data: HeteroData) -> Dict[str, torch.Tensor]:
         if "operation" not in data.node_types or data["operation"].x is None:
             raise ValueError("HeteroData is missing operation node features")
@@ -259,6 +262,7 @@ class GraphEncoder(nn.Module):
             mach_x,
             op_batch=getattr(data["operation"], "batch", None),
             mach_batch=getattr(data["machine"], "batch", None),
+            n_graph=getattr(data, "num_graphs", None),
         )
         return {
             "operation": self.operation_encoder(op_x),
@@ -271,6 +275,7 @@ class GraphEncoder(nn.Module):
         mach_x: torch.Tensor,
         op_batch: torch.Tensor | None = None,
         mach_batch: torch.Tensor | None = None,
+        n_graph: int | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Per-graph mean duration scale so collation cannot mix instance units."""
         op_x = op_x.clone()
@@ -282,7 +287,10 @@ class GraphEncoder(nn.Module):
             mach_x[:, MACH_IDLE_DURATION] = mach_x[:, MACH_IDLE_DURATION] / scale
             return op_x, mach_x
 
-        n_graph = int(op_batch.max().item()) + 1
+        if n_graph is None:
+            n_graph = int(op_batch[-1].item()) + 1 if op_batch.numel() else 1
+        else:
+            n_graph = int(n_graph)
         dur = op_x[:, OP_DURATION]
         sums = torch.zeros(n_graph, device=op_x.device, dtype=op_x.dtype)
         counts = torch.zeros(n_graph, device=op_x.device, dtype=op_x.dtype)
@@ -420,7 +428,7 @@ class GraphEncoder(nn.Module):
             machine/operation embeddings have shape ``(N, hidden_dim)`` and
             ``graph_embedding`` has shape ``(hidden_dim,)``.
         """
-        device = next(self.parameters()).device
+        device = self._module_device()
         # Move local views only — never call data.to(device) in-place.
         local = HeteroData()
         local["operation"].x = data["operation"].x.float().to(device)
@@ -457,13 +465,7 @@ class GraphEncoder(nn.Module):
         if not graphs:
             raise ValueError("encode_batch received an empty graph list")
 
-        n_ops = [int(g["operation"].x.size(0)) for g in graphs]
-        n_mach = [int(g["machine"].x.size(0)) for g in graphs]
-        same_size = len(graphs) > 1 and len(set(n_ops)) == 1 and len(set(n_mach)) == 1
-        if not same_size:
-            return self._encode_serial(graphs)
-
-        device = next(self.parameters()).device
+        device = self._module_device()
         batch_graphs = [self._batchable_view(g) for g in graphs]
         try:
             batch = Batch.from_data_list(batch_graphs)

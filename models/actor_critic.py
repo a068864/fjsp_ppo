@@ -118,6 +118,40 @@ class GraphActorCritic(nn.Module):
         return mat
 
     @staticmethod
+    def efficiency_matrix_batched(
+        graphs: Sequence[HeteroData],
+        device: torch.device,
+        n_ops: int,
+        n_mach: int,
+    ) -> torch.Tensor:
+        """Build ``(B, n_ops, n_machines)`` efficiency from compatible edges."""
+        batch = len(graphs)
+        mat = torch.zeros((batch, n_ops, n_mach), dtype=torch.float32, device=device)
+        key = ("operation", "compatible", "machine")
+        batch_ids: List[torch.Tensor] = []
+        srcs: List[torch.Tensor] = []
+        dsts: List[torch.Tensor] = []
+        attrs: List[torch.Tensor] = []
+        for i, data in enumerate(graphs):
+            if key not in data.edge_types:
+                continue
+            edge_index = data[key].edge_index
+            edge_attr = getattr(data[key], "edge_attr", None)
+            if edge_index is None or edge_index.numel() == 0 or edge_attr is None:
+                continue
+            n_e = int(edge_index.size(1))
+            srcs.append(edge_index[0].to(device=device, dtype=torch.long))
+            dsts.append(edge_index[1].to(device=device, dtype=torch.long))
+            attrs.append(edge_attr.reshape(-1).to(device=device, dtype=torch.float32))
+            batch_ids.append(
+                torch.full((n_e,), i, dtype=torch.long, device=device)
+            )
+        if not srcs:
+            return mat
+        mat[torch.cat(batch_ids), torch.cat(srcs), torch.cat(dsts)] = torch.cat(attrs)
+        return mat
+
+    @staticmethod
     def dispatch_score_matrix(
         data: HeteroData,
         efficiency: torch.Tensor,
@@ -250,7 +284,7 @@ class GraphActorCritic(nn.Module):
         Returns:
             ``(logits, value)`` with shapes ``(n_actions,)`` and ``()``.
         """
-        device = next(self.parameters()).device
+        device = self.encoder._module_device()
         machine_emb, operation_emb, graph_emb = self.encoder(data)
         logits = self._assignment_logits(data, machine_emb, operation_emb, device)
         logits = self.apply_action_mask(logits, action_mask)
@@ -280,10 +314,9 @@ class GraphActorCritic(nn.Module):
         if batch_size == 0:
             raise ValueError("Empty graph batch")
 
-        device = next(self.parameters()).device
-        # Same-size graphs collate without changing embeddings (encode_batch
-        # splits on ptr). Mixed sizes fall back inside encode_batch; actor
-        # still uses per-graph pair scores then pads logits.
+        device = self.encoder._module_device()
+        # encode_batch collates mixed N (ptr split). Same-size batches stack
+        # pair scores; mixed sizes still score per graph then pad logits.
         machine_list, operation_list, graph_emb_batch = self.encoder.encode_batch(graphs)
         values = self.critic(graph_emb_batch).squeeze(-1)
 
@@ -295,8 +328,8 @@ class GraphActorCritic(nn.Module):
         if same_size:
             machine_emb = torch.stack(machine_list, dim=0)
             operation_emb = torch.stack(operation_list, dim=0)
-            efficiency = torch.stack(
-                [self.efficiency_matrix(graph, device) for graph in graphs], dim=0
+            efficiency = self.efficiency_matrix_batched(
+                graphs, device, n_operations, n_machines
             )
             duration = torch.stack(
                 [graph["operation"].x[:, 0] for graph in graphs], dim=0

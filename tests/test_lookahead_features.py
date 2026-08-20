@@ -53,6 +53,26 @@ def test_critical_path_on_chain():
     env.close()
 
 
+def test_cp_cache_matches_fresh_kahn_after_step():
+    env = FJSPEnv(n_machines=3, n_jobs=2, avg_operations_per_job=2, seed=0, device="cpu")
+    obs, _ = env.reset(seed=0)
+    valid = np.flatnonzero(obs["action_mask"])
+    if valid.size == 0:
+        env.close()
+        return
+    obs, _, terminated, truncated, _ = env.step(int(valid[0]))
+    if terminated or truncated:
+        env.close()
+        return
+    cached = env.state["operation"].x[:, OP_CP_REMAINING].clone()
+    env._cp_order = None
+    env._cp_known = None
+    env._refresh_lookahead_features()
+    fresh = env.state["operation"].x[:, OP_CP_REMAINING]
+    assert torch.allclose(cached, fresh, atol=1e-5)
+    env.close()
+
+
 def test_job_remaining_tracks_unfinished_members():
     env = FJSPEnv(n_machines=3, n_jobs=2, avg_operations_per_job=2, seed=0, device="cpu")
     env.reset(seed=0)

@@ -17,6 +17,20 @@ def test_parse_args_debug_flag():
     assert parse_args([]).debug is False
 
 
+def test_use_subprocess_cpu_vs_flags():
+    from config import get_debug_train_config
+    from train import _use_subprocess, parse_args
+
+    cfg = get_debug_train_config()
+    cfg.n_envs = 2
+    cfg.device = "cpu"
+    assert _use_subprocess(cfg, None) is True
+    assert _use_subprocess(cfg, parse_args(["--dummy-vec"])) is False
+    assert _use_subprocess(cfg, parse_args(["--subproc"])) is True
+    cfg.n_envs = 1
+    assert _use_subprocess(cfg, parse_args(["--subproc"])) is False
+
+
 def test_process_rss_bytes_is_positive():
     from training.benchmark import process_rss_bytes
 

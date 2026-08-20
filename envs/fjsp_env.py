@@ -253,6 +253,10 @@ class FJSPEnv(gym.Env):
         self._front_machines = torch.empty(0, dtype=torch.long, device=self.device)
         self._front_ops = torch.empty(0, dtype=torch.long, device=self.device)
         self._front_can_process = torch.empty(0, dtype=torch.bool, device=self.device)
+        self._cp_order: Optional[np.ndarray] = None
+        self._cp_known: Optional[np.ndarray] = None
+        self._dep_code: Optional[torch.Tensor] = None
+        self._dep_code_types: Optional[dict] = None
 
         # Dummy Discrete(2): SB3 builds an unused Linear head of this width.
         # Live actions are flat indices ``machine * n_operations + operation``.
@@ -619,6 +623,10 @@ class FJSPEnv(gym.Env):
             self.cached_efficiency_modifiers = self.efficiency_modifiers.clone()
             self.cached_dependency_types = dict(self.dependency_types)
             self.cached_job_sequences = [list(seq) for seq in self.job_sequences]
+            self._cp_order = None
+            self._cp_known = None
+            self._dep_code = None
+            self._dep_code_types = None
         else:
             # Fast reset path - use cached initial state
             self.state = self.initial_state.clone()
@@ -665,12 +673,12 @@ class FJSPEnv(gym.Env):
         start = float(self._machine_free[machine])
         dep = self.state["operation", "precede", "operation"].edge_index
         if dep.numel() > 0:
-            for pred, succ in zip(dep[0].tolist(), dep[1].tolist()):
-                if int(succ) != operation:
-                    continue
-                pred_done = float(self._op_completion[int(pred)])
-                if pred_done > start:
-                    start = pred_done
+            pred = dep[0][dep[1] == operation]
+            if pred.numel() > 0:
+                start = max(
+                    start,
+                    float(np.max(self._op_completion[pred.detach().cpu().numpy()])),
+                )
         end = start + float(proc)
         self._op_completion[operation] = end
         self._machine_free[machine] = end
@@ -699,16 +707,31 @@ class FJSPEnv(gym.Env):
             return attr is None or int(attr.size(0)) == 0
         return attr is not None and int(attr.size(0)) == int(edge_index.size(1))
 
+    def _dep_code_matrix(self) -> torch.Tensor:
+        """n×n precede-type codes; rebuilt when ``dependency_types`` is replaced."""
+        types = self.dependency_types
+        cached = self._dep_code
+        if (
+            cached is not None
+            and cached.size(0) == self.n_operations
+            and self._dep_code_types is types
+        ):
+            return cached
+        n = self.n_operations
+        mat = torch.zeros((n, n), dtype=torch.float32, device=self.device)
+        for (src, dst), dep_type in (types or {}).items():
+            mat[int(src), int(dst)] = DEP_TYPE_ATTR.get(dep_type, 0.0)
+        self._dep_code = mat
+        self._dep_code_types = types
+        return mat
+
     def _precede_attr_from_types(self, edge_index: torch.Tensor) -> torch.Tensor:
         """Dep-type scalar per precede edge (sequential=1, parallel=2, cross_job=3)."""
         n_edges = int(edge_index.size(1))
         if n_edges == 0:
             return torch.zeros((0, 1), dtype=torch.float32, device=self.device)
-        codes = [
-            DEP_TYPE_ATTR.get(self.dependency_types.get((int(src), int(dst))), 0.0)
-            for src, dst in edge_index.t().tolist()
-        ]
-        return torch.tensor(codes, dtype=torch.float32, device=self.device).unsqueeze(-1)
+        codes = self._dep_code_matrix()[edge_index[0], edge_index[1]]
+        return codes.unsqueeze(-1)
 
     def _sync_precede_attrs(self) -> None:
         """Keep precede edge_attr aligned with live edges and dependency_types."""
@@ -735,24 +758,7 @@ class FJSPEnv(gym.Env):
             if edge_index.numel() > 0:
                 dying = dead[edge_index[0]]
                 if bool(dying.any().item()):
-                    op_x = self.state["operation"].x
-                    for src, succ in zip(
-                        edge_index[0][dying].tolist(),
-                        edge_index[1][dying].tolist(),
-                    ):
-                        dep_type = self.dependency_types.get((int(src), int(succ)))
-                        col = (
-                            OP_SEQ_DEPS
-                            if dep_type == "sequential"
-                            else OP_PAR_DEPS
-                            if dep_type == "parallel"
-                            else OP_CROSS_DEPS
-                            if dep_type == "cross_job"
-                            else None
-                        )
-                        if col is None:
-                            continue
-                        op_x[succ, col] = torch.maximum(op_x[succ, col] - 1, self._zero)
+                    self._decrement_dying_precede(edge_index, dying)
 
         for key in self._MUTABLE_EDGE_TYPES:
             if key not in self.state.edge_index_dict:
@@ -768,6 +774,48 @@ class FJSPEnv(gym.Env):
             if dst_is_op:
                 mask &= ~dead[edge_index[1]]
             self._apply_edge_keep_mask(key, mask)
+
+    def _decrement_dying_precede(
+        self, edge_index: torch.Tensor, dying: torch.Tensor
+    ) -> None:
+        """Subtract one incoming dep-count per dying precede edge (same as the old loop)."""
+        op_x = self.state["operation"].x
+        succ = edge_index[1][dying]
+        attr = getattr(
+            self.state["operation", "precede", "operation"], "edge_attr", None
+        )
+        if attr is not None and int(attr.size(0)) == int(edge_index.size(1)):
+            codes = attr.reshape(-1)[dying]
+            valid = (codes == 1) | (codes == 2) | (codes == 3)
+            if not bool(valid.any().item()):
+                return
+            succ = succ[valid]
+            cols = codes[valid].long()
+            flat = succ.long() * int(op_x.size(1)) + cols
+            op_x.view(-1).scatter_add_(
+                0, flat, torch.full((flat.numel(),), -1.0, device=op_x.device, dtype=op_x.dtype)
+            )
+            op_x[:, OP_SEQ_DEPS : OP_CROSS_DEPS + 1] = torch.maximum(
+                op_x[:, OP_SEQ_DEPS : OP_CROSS_DEPS + 1], self._zero
+            )
+            return
+        for src_i, succ_i in zip(
+            edge_index[0][dying].tolist(),
+            succ.tolist(),
+        ):
+            dep_type = self.dependency_types.get((int(src_i), int(succ_i)))
+            col = (
+                OP_SEQ_DEPS
+                if dep_type == "sequential"
+                else OP_PAR_DEPS
+                if dep_type == "parallel"
+                else OP_CROSS_DEPS
+                if dep_type == "cross_job"
+                else None
+            )
+            if col is None:
+                continue
+            op_x[succ_i, col] = torch.maximum(op_x[succ_i, col] - 1, self._zero)
 
     def _apply_edge_keep_mask(self, key, mask: torch.Tensor) -> None:
         edge_index = self.state[key].edge_index
@@ -826,10 +874,7 @@ class FJSPEnv(gym.Env):
         job_ops = remaining.new_zeros(n)
         if not self.job_sequences:
             return job_work, job_ops
-        job_id = torch.zeros(n, dtype=torch.long, device=remaining.device)
-        for job_idx, seq in enumerate(self.job_sequences):
-            if seq:
-                job_id[seq] = job_idx
+        job_id = self._job_id_tensor(n, remaining.device)
         n_jobs = len(self.job_sequences)
         alive = (~finished).to(dtype=remaining.dtype)
         work = remaining.new_zeros(n_jobs)
@@ -838,8 +883,27 @@ class FJSPEnv(gym.Env):
         ops.scatter_add_(0, job_id, alive)
         return work[job_id], ops[job_id]
 
-    @staticmethod
+    def _job_id_tensor(self, n: int, device: torch.device) -> torch.Tensor:
+        """Operation → job index; rebuilt when sequences are replaced."""
+        seqs = self.job_sequences
+        cached = getattr(self, "_job_id", None)
+        if (
+            cached is not None
+            and int(cached.numel()) == n
+            and cached.device == device
+            and getattr(self, "_job_id_seqs", None) is seqs
+        ):
+            return cached
+        job_id = torch.zeros(n, dtype=torch.long, device=device)
+        for job_idx, seq in enumerate(seqs or []):
+            if seq:
+                job_id[seq] = job_idx
+        self._job_id = job_id
+        self._job_id_seqs = seqs
+        return job_id
+
     def _critical_path_remaining(
+        self,
         remaining: torch.Tensor,
         finished: torch.Tensor,
         dep: torch.Tensor,
@@ -852,21 +916,40 @@ class FJSPEnv(gym.Env):
         if dep.numel() == 0:
             return torch.as_tensor(cp, dtype=remaining.dtype, device=remaining.device)
         dep_np = dep.detach().cpu().numpy()
+        src_np, dst_np = dep_np[0], dep_np[1]
         succ: List[List[int]] = [[] for _ in range(n)]
-        indeg = np.zeros(n, dtype=np.int32)
-        for src, dst in zip(dep_np[0], dep_np[1]):
-            u, v = int(src), int(dst)
-            succ[u].append(v)
-            indeg[v] += 1
-        order: List[int] = []
-        queue = deque(np.flatnonzero(indeg == 0).tolist())
-        while queue:
-            u = queue.popleft()
-            order.append(u)
-            for v in succ[u]:
-                indeg[v] -= 1
-                if indeg[v] == 0:
-                    queue.append(v)
+        for src, dst in zip(src_np, dst_np):
+            succ[int(src)].append(int(dst))
+
+        known = self._cp_known
+        order_np = self._cp_order
+        reuse = (
+            order_np is not None
+            and int(order_np.size) == n
+            and known is not None
+            and known.shape == (n, n)
+            and bool(known[src_np, dst_np].all())
+        )
+        if reuse:
+            order = order_np.tolist()
+        else:
+            indeg = np.zeros(n, dtype=np.int32)
+            for dst in dst_np:
+                indeg[int(dst)] += 1
+            order = []
+            queue = deque(np.flatnonzero(indeg == 0).tolist())
+            while queue:
+                u = queue.popleft()
+                order.append(u)
+                for v in succ[u]:
+                    indeg[v] -= 1
+                    if indeg[v] == 0:
+                        queue.append(v)
+            self._cp_order = np.asarray(order, dtype=np.int64)
+            known = np.zeros((n, n), dtype=bool)
+            known[src_np, dst_np] = True
+            self._cp_known = known
+
         for u in reversed(order):
             if fin_np[u]:
                 continue

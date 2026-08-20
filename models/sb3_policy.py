@@ -127,7 +127,10 @@ class GraphActorCriticPolicy(ActorCriticPolicy):
                     arr[0] = value
                     packed[key] = arr
             elif key == ACTION_MASK_KEY:
-                packed[key] = self._pack_action_mask(value, vectorized=vectorized)
+                if torch.is_tensor(value):
+                    packed[key] = value
+                else:
+                    packed[key] = self._pack_action_mask(value, vectorized=vectorized)
             else:
                 arr = value.detach().cpu().numpy() if torch.is_tensor(value) else np.asarray(value)
                 if not vectorized and arr.ndim == 1:

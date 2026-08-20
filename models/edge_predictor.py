@@ -49,7 +49,18 @@ class EdgePredictor(nn.Module):
         self.scale = math.sqrt(2.0 * hidden_dim)
         if predictor_type == "bilinear":
             self.interaction_weight = nn.Parameter(torch.empty(hidden_dim, hidden_dim))
+        self._gn_index_cache: dict[tuple, torch.Tensor] = {}
         self.reset_parameters()
+
+    def _graph_norm_index(
+        self, batch_size: int, n_nodes: int, device: torch.device
+    ) -> torch.Tensor:
+        key = (batch_size, n_nodes, device.type, device.index)
+        cached = self._gn_index_cache.get(key)
+        if cached is None or cached.device != device:
+            cached = torch.arange(batch_size, device=device).repeat_interleave(n_nodes)
+            self._gn_index_cache[key] = cached
+        return cached
 
     def _pair_scores(
         self,
@@ -100,8 +111,8 @@ class EdgePredictor(nn.Module):
         batch_size, n_machines, hidden = machine_emb.shape
         n_operations = operation_emb.size(1)
         device = machine_emb.device
-        m_batch = torch.arange(batch_size, device=device).repeat_interleave(n_machines)
-        o_batch = torch.arange(batch_size, device=device).repeat_interleave(n_operations)
+        m_batch = self._graph_norm_index(batch_size, n_machines, device)
+        o_batch = self._graph_norm_index(batch_size, n_operations, device)
         m = self.norm_m(
             machine_emb.reshape(batch_size * n_machines, hidden),
             batch=m_batch,

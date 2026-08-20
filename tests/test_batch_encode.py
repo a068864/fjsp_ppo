@@ -71,6 +71,26 @@ def test_encode_batch_matches_independent_forward():
             assert torch.allclose(logits_b[i], logits_i, atol=1e-5), f"logits {i}"
             assert torch.allclose(values_b[i], value_i, atol=1e-5), f"value {i}"
 
+        m1, o1, g1 = enc.encode_batch([graphs[0]])
+        m_i, o_i, g_i = enc.forward(graphs[0])
+        assert torch.allclose(m1[0], m_i, atol=1e-5)
+        assert torch.allclose(o1[0], o_i, atol=1e-5)
+        assert torch.allclose(g1[0], g_i, atol=1e-5)
+
+
+def test_efficiency_matrix_batched_matches_per_graph():
+    graphs, _ = _mixed_edge_rollout_graphs(4)
+    device = torch.device("cpu")
+    n_ops = int(graphs[0]["operation"].x.size(0))
+    n_mach = int(graphs[0]["machine"].x.size(0))
+    batched = GraphActorCritic.efficiency_matrix_batched(
+        graphs, device, n_ops, n_mach
+    )
+    stacked = torch.stack(
+        [GraphActorCritic.efficiency_matrix(graph, device) for graph in graphs]
+    )
+    assert torch.allclose(batched, stacked)
+
 
 def test_ppo_pre_update_kl_near_zero(tmp_path):
     """Collect-time log-probs must match batched evaluate_actions before SGD.

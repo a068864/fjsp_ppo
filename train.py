@@ -67,6 +67,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--dummy-vec", action="store_true", help="Force in-process GraphDummyVecEnv")
     parser.add_argument(
+        "--subproc",
+        action="store_true",
+        help="Force GraphSubprocVecEnv when n_envs > 1 (default on CPU)",
+    )
+    parser.add_argument(
         "--n-machines",
         type=int,
         default=None,
@@ -158,6 +163,21 @@ def build_ppo(cfg: TrainConfig, train_env) -> GraphPPO:
     return model
 
 
+def _use_subprocess(cfg: TrainConfig, args: Optional[argparse.Namespace]) -> bool:
+    """Subproc on CPU multi-env; DummyVec on GPU/MPS unless --subproc."""
+    if cfg.n_envs == 1:
+        return False
+    dummy = bool(args is not None and getattr(args, "dummy_vec", False))
+    subproc = bool(args is not None and getattr(args, "subproc", False))
+    if dummy and subproc:
+        raise ValueError("Use only one of --dummy-vec and --subproc")
+    if dummy:
+        return False
+    if subproc:
+        return True
+    return get_device(cfg.device).type == "cpu"
+
+
 def resolve_resume_path(cfg: TrainConfig) -> Optional[Path]:
     """Return the latest checkpoint path when resume is enabled and trusted."""
     latest = cfg.latest_model_path()
@@ -200,11 +220,7 @@ def train(cfg: Optional[TrainConfig] = None, args: Optional[argparse.Namespace] 
     ensure_dir(cfg.tensorboard_log)
     set_global_seed(cfg.seed, deterministic=cfg.deterministic_torch)
 
-    use_subprocess = True
-    if args is not None and args.dummy_vec:
-        use_subprocess = False
-    if cfg.n_envs == 1:
-        use_subprocess = False
+    use_subprocess = _use_subprocess(cfg, args)
 
     logger.info(
         "Building train env (n_envs=%d subprocess=%s) instance=%dx%dx%d",

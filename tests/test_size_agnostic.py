@@ -109,6 +109,33 @@ def test_mixed_size_forward_pads_logits():
     env_b.close()
 
 
+def test_encode_batch_mixed_size_matches_forward():
+    env_a = FJSPEnv(
+        n_machines=2, n_jobs=1, avg_operations_per_job=2, seed=0, device="cpu"
+    )
+    env_b = FJSPEnv(
+        n_machines=4, n_jobs=2, avg_operations_per_job=3, seed=1, device="cpu"
+    )
+    ga = env_a.reset(seed=0)[0]["graph"]
+    gb = env_b.reset(seed=1)[0]["graph"]
+    from models.graph_encoder import GraphEncoder
+
+    enc = GraphEncoder(hidden_dim=16, num_layers=1, num_heads=2)
+    enc.eval()
+    with torch.no_grad():
+        m_list, o_list, g_batch = enc.encode_batch([ga, gb])
+        ma, oa, ga_emb = enc.forward(ga)
+        mb, ob, gb_emb = enc.forward(gb)
+    assert torch.allclose(m_list[0], ma, atol=1e-5)
+    assert torch.allclose(o_list[0], oa, atol=1e-5)
+    assert torch.allclose(g_batch[0], ga_emb, atol=1e-5)
+    assert torch.allclose(m_list[1], mb, atol=1e-5)
+    assert torch.allclose(o_list[1], ob, atol=1e-5)
+    assert torch.allclose(g_batch[1], gb_emb, atol=1e-5)
+    env_a.close()
+    env_b.close()
+
+
 def test_reset_keeps_configured_instance_size():
     env = FJSPEnv(
         n_machines=5, n_jobs=3, avg_operations_per_job=4, seed=0, device="cpu"
