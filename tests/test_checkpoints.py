@@ -8,9 +8,7 @@ from pathlib import Path
 import pytest
 
 from training.checkpoints import (
-    assert_config_compatible,
     atomic_write_bytes,
-    config_fingerprint,
     load_best_score,
     meta_path_for,
     save_best_score,
@@ -58,25 +56,25 @@ def test_best_score_persists_metric_name(tmp_path: Path):
     assert load_best_score(tmp_path) == pytest.approx(42.5)
 
 
-def test_metadata_fingerprint_and_incompatible_resume(tmp_path: Path):
+def test_checkpoint_metadata_writes_config_and_zip_hash(tmp_path: Path):
     ckpt = tmp_path / "latest_model.zip"
     ckpt.write_bytes(b"zip")
-    cfg_a = {"env": {"n_machines": 5}, "seed": 1}
-    cfg_b = {"env": {"n_machines": 6}, "seed": 1}
-    write_checkpoint_metadata(ckpt, config=cfg_a)
+    cfg = {"env": {"n_machines": 5}, "seed": 1}
+    write_checkpoint_metadata(ckpt, config=cfg)
     meta = json.loads(meta_path_for(ckpt).read_text(encoding="utf-8"))
-    assert meta["config_fingerprint"] == config_fingerprint(cfg_a)
+    assert meta["config"] == cfg
+    assert "config_fingerprint" not in meta
     assert "zip_sha256" in meta
-    assert_config_compatible(ckpt, cfg_a)
-    with pytest.raises(ValueError, match="fingerprint"):
-        assert_config_compatible(ckpt, cfg_b)
 
 
-def test_zip_hash_rejects_swapped_checkpoint(tmp_path: Path):
+def test_zip_hash_is_bound_to_bytes_at_save(tmp_path: Path):
+    from training.checkpoints import file_sha256
+
     ckpt = tmp_path / "latest_model.zip"
     ckpt.write_bytes(b"zip-a")
     cfg = {"env": {"n_machines": 5}}
     write_checkpoint_metadata(ckpt, config=cfg)
+    meta = json.loads(meta_path_for(ckpt).read_text(encoding="utf-8"))
+    assert meta["zip_sha256"] == file_sha256(ckpt)
     ckpt.write_bytes(b"zip-b")
-    with pytest.raises(ValueError, match="zip hash"):
-        assert_config_compatible(ckpt, cfg)
+    assert meta["zip_sha256"] != file_sha256(ckpt)

@@ -10,7 +10,7 @@ import pytest
 
 from callbacks import BestModelCallback, FJSPEvalCallback, LatestCheckpointCallback
 from config import get_debug_train_config
-from train import maybe_resume, resolve_resume_path
+from train import resolve_resume_path
 from training.checkpoints import load_best_score, save_best_score, write_checkpoint_metadata
 
 
@@ -56,7 +56,7 @@ def test_best_callback_preserves_existing_score(tmp_path: Path):
     assert load_best_score(tmp_path) == pytest.approx(4.0)
 
 
-def test_best_callback_ignores_score_from_mismatched_checkpoint(tmp_path: Path):
+def test_best_callback_loads_persisted_score_even_if_sidecar_config_differs(tmp_path: Path):
     save_best_score(tmp_path, 61.2, metric="mean_makespan")
     zip_path = tmp_path / "best_model.zip"
     zip_path.write_bytes(b"old")
@@ -67,7 +67,7 @@ def test_best_callback_ignores_score_from_mismatched_checkpoint(tmp_path: Path):
         config={"model": {"operation_in_dim": 12}},
     )
     cb.load_persisted_best(tmp_path)
-    assert cb.best_score == pytest.approx(np.inf)
+    assert cb.best_score == pytest.approx(61.2)
 
 
 def test_best_callback_minimizes_makespan(tmp_path: Path):

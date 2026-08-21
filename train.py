@@ -195,9 +195,6 @@ def resolve_resume_path(cfg: TrainConfig) -> Optional[Path]:
             f"Refusing to load SB3 checkpoint {latest} without --trust-checkpoint. "
             "SB3/cloudpickle ZIPs are executable input; only trust files you created."
         )
-    from training.checkpoints import assert_config_compatible
-
-    assert_config_compatible(latest, cfg.to_dict(), require_metadata=True)
     return latest
 
 

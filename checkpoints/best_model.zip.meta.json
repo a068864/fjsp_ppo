@@ -1,0 +1,63 @@
+{
+  "best_metric": "mean_makespan",
+  "best_score": 98.73183677196502,
+  "checkpoint": "best_model.zip",
+  "config": {
+    "best_metric": "mean_makespan",
+    "best_model_name": "best_model.zip",
+    "checkpoint_dir": "/content/drive/MyDrive/fjsp_ppo/checkpoints",
+    "checkpoint_freq_updates": 8,
+    "deterministic_torch": false,
+    "device": "cuda",
+    "env": {
+      "avg_operations_per_job": 8,
+      "compatible_efficiency_std": 0.2,
+      "connection_drop_prob": 0.6,
+      "cross_job_dep_prob": 0.6,
+      "max_operation_duration": 20,
+      "min_eligible_machines": 2,
+      "n_jobs": 15,
+      "n_machines": 25,
+      "shared_dep_prob": 0.4,
+      "time_penalty": -0.1,
+      "time_step": 1.0
+    },
+    "eval_freq_updates": 8,
+    "eval_seed": 1000042,
+    "latest_model_name": "latest_model.zip",
+    "lr_end_fraction": 0.3,
+    "lr_schedule": "linear",
+    "model": {
+      "critic_hidden_dim": 256,
+      "dropout": 0.0,
+      "hidden_dim": 128,
+      "machine_in_dim": 3,
+      "num_heads": 8,
+      "num_layers": 4,
+      "operation_in_dim": 12,
+      "predictor_type": "bilinear"
+    },
+    "n_envs": 8,
+    "n_eval_episodes": 20,
+    "ppo": {
+      "batch_size": 256,
+      "clip_range": 0.2,
+      "ent_coef": 0.02,
+      "gae_lambda": 1.0,
+      "gamma": 1.0,
+      "learning_rate": 0.0001,
+      "max_grad_norm": 5.0,
+      "n_epochs": 4,
+      "n_steps": 512,
+      "target_kl": 0.015,
+      "total_timesteps": 1048576,
+      "vf_coef": 0.1
+    },
+    "resume": false,
+    "seed": 42,
+    "tensorboard_log": "/content/drive/MyDrive/fjsp_ppo/logs",
+    "trust_checkpoint": false
+  },
+  "config_fingerprint": "5aa5ee641e12489e60f2acd8254b0fc23d058b099d2e0adb8da3e59cc2e4e8a8",
+  "zip_sha256": "00219c70bced061af14a25594e907b37e05358f26a3d053b2d4987ecc80718b0"
+}
