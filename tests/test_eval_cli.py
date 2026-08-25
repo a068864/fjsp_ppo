@@ -56,7 +56,7 @@ def test_eval_config_from_args_full_scale():
     full = eval_config_from_args(Namespace(full_scale=True))
     assert full.env.n_machines == 25
     assert full.seed == 1_000_042
-    assert full.model_path == "./checkpoints_full/best_model.zip"
+    assert full.model_path == "./checkpoints/best_model.zip"
 
 
 def test_heuristic_milp_and_lp_cli_full_scale_upgrades_demo_config():

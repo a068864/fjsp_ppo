@@ -71,6 +71,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=None,
         help="CBC wall-clock limit in seconds per instance for MILP and LP",
     )
+    parser.add_argument(
+        "--skip-milp",
+        action="store_true",
+        help="Skip exact MILP (slow on full-scale); still runs PPO/random/heuristics/LP",
+    )
     add_shared_eval_args(parser)
     return parser.parse_args(argv)
 
@@ -226,14 +231,16 @@ def run_comparison(
             )
             rows.append(_row(f"H-{rule}", heur))
 
-        eval_env.seed(cfg.seed)
-        milp = evaluate_milp_fjsp(
-            eval_env,
-            n_episodes=cfg.n_episodes,
-            seed=cfg.seed,
-            time_limit=time_limit,
-        )
-        rows.append(_row("MILP", milp, time_is_per_episode=True))
+        skip_milp = bool(getattr(args, "skip_milp", False)) if args is not None else False
+        if not skip_milp:
+            eval_env.seed(cfg.seed)
+            milp = evaluate_milp_fjsp(
+                eval_env,
+                n_episodes=cfg.n_episodes,
+                seed=cfg.seed,
+                time_limit=time_limit,
+            )
+            rows.append(_row("MILP", milp, time_is_per_episode=True))
 
         eval_env.seed(cfg.seed)
         lp, lp_rows = evaluate_lp_rounding_fjsp(

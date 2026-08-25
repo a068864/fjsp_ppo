@@ -99,8 +99,8 @@ def test_full_scale_train_config_geometry_and_batching():
     assert cfg.lr_end_fraction == 0.3
     assert cfg.ppo.total_timesteps == 2_097_152
     assert cfg.ppo.total_timesteps & (cfg.ppo.total_timesteps - 1) == 0
-    assert cfg.checkpoint_dir == "./checkpoints_full"
-    assert cfg.tensorboard_log == "./logs_full"
+    assert cfg.checkpoint_dir == "./checkpoints"
+    assert cfg.tensorboard_log == "./logs"
     assert cfg.eval_seed == cfg.seed + 1_000_000
     assert (cfg.ppo.n_steps * cfg.n_envs) % cfg.ppo.batch_size == 0
     eval_cfg = get_full_scale_eval_config()

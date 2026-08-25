@@ -659,6 +659,16 @@ class FJSPEnv(gym.Env):
         self._machine_free.fill(0.0)
         self._op_completion.fill(0.0)
         self._classic_cmax = 0.0
+        # Freeze precede preds for classic Cmax. Live edge_index shrinks as ops
+        # finish on the env clock; classic finish-to-start must keep the instance DAG.
+        self._classic_preds: List[List[int]] = [[] for _ in range(self.n_operations)]
+        if self.state is not None:
+            dep = self.state["operation", "precede", "operation"].edge_index
+            if dep is not None and dep.numel() > 0:
+                src = dep[0].detach().cpu().tolist()
+                dst = dep[1].detach().cpu().tolist()
+                for a, b in zip(src, dst):
+                    self._classic_preds[int(b)].append(int(a))
 
     def _classic_logged_makespan(self, success: bool) -> float:
         """Earliest-start Cmax of the inferred assignment sequence, or inf."""
@@ -669,14 +679,8 @@ class FJSPEnv(gym.Env):
     def _accumulate_classic_cmax(self, operation: int, machine: int, proc: float) -> None:
         """Update running earliest-start Cmax for one constructive assignment."""
         start = float(self._machine_free[machine])
-        dep = self.state["operation", "precede", "operation"].edge_index
-        if dep.numel() > 0:
-            pred = dep[0][dep[1] == operation]
-            if pred.numel() > 0:
-                start = max(
-                    start,
-                    float(np.max(self._op_completion[pred.detach().cpu().numpy()])),
-                )
+        for pred in self._classic_preds[int(operation)]:
+            start = max(start, float(self._op_completion[int(pred)]))
         end = start + float(proc)
         self._op_completion[operation] = end
         self._machine_free[machine] = end
@@ -1016,19 +1020,6 @@ class FJSPEnv(gym.Env):
             return []
         return torch.where(self.eligibility_matrix[operation])[0].tolist()
 
-    def _is_gridlock(
-        self,
-        processing: torch.Tensor,
-        blocked_machines: int,
-    ) -> bool:
-        """True when queued fronts exist but none can process."""
-        proc_edges = self.state["machine", "processing", "operation"].edge_index
-        if proc_edges.numel() == 0:
-            return False
-        if bool(processing.any().item()):
-            return False
-        return int(blocked_machines) > 0
-
     def _policy_graph_snapshot(self) -> HeteroData:
         """Clone only policy-consumed tensors (features, edges, efficiency attrs)."""
         from models.graph_encoder import EDGE_TYPES
@@ -1095,16 +1086,11 @@ class FJSPEnv(gym.Env):
             mask = self._compute_action_mask(state)
         return np.flatnonzero(mask).astype(np.int64).tolist()
 
-    def _get_processing_operations(self) -> Tuple[torch.Tensor, int]:
+    def _get_processing_operations(self) -> torch.Tensor:
         """Queue-front ops that may run: machine front ∧ precede preds finished.
 
         Unlike the action mask, a scheduled successor stays blocked until
         predecessors finish — even if it was already assignable.
-
-        Returns:
-            Tuple of:
-            - processing: Boolean tensor indicating which operations can process
-            - blocked_machines: Number of machines with front operations that cannot be processed
         """
         processing = torch.zeros(self.n_operations, dtype=torch.bool, device=self.device)
         self._front_machines = torch.empty(0, dtype=torch.long, device=self.device)
@@ -1112,7 +1098,7 @@ class FJSPEnv(gym.Env):
         self._front_can_process = torch.empty(0, dtype=torch.bool, device=self.device)
         edge_index = self.state["machine", "processing", "operation"].edge_index
         if edge_index.numel() == 0:
-            return processing, 0
+            return processing
 
         machines = edge_index[0]
         ops = edge_index[1]
@@ -1124,7 +1110,7 @@ class FJSPEnv(gym.Env):
         first.scatter_reduce_(0, machines.long(), order, reduce="amin")
         busy = first < n_edges
         if not bool(busy.any().item()):
-            return processing, 0
+            return processing
         front_machines = torch.nonzero(busy, as_tuple=False).view(-1)
         front_ops = ops[first[front_machines]]
 
@@ -1141,8 +1127,7 @@ class FJSPEnv(gym.Env):
         self._front_machines = front_machines
         self._front_ops = front_ops
         self._front_can_process = can_process
-        blocked_machines = int((~can_process).sum().item())
-        return processing, blocked_machines
+        return processing
 
     def _ticks_to_next_completion(self, processing_ops: torch.Tensor) -> int:
         remaining = self.state["operation"].x[processing_ops, OP_REMAINING]
@@ -1232,7 +1217,7 @@ class FJSPEnv(gym.Env):
         completed_all: List[int] = []
         dt = float(self.time_step)
         while left > 0:
-            processing_ops, _blocked = self._get_processing_operations()
+            processing_ops = self._get_processing_operations()
             if not bool(processing_ops.any().item()):
                 self._advance_clock(left * dt)
                 break
@@ -1407,30 +1392,8 @@ class FJSPEnv(gym.Env):
         self.schedule_operation(machine, operation)
         reward = self._completion_delta_reward(before_cmax, self._classic_cmax)
 
-        processing_ops, blocked_machines = self._get_processing_operations()
-        if self._is_gridlock(processing_ops, blocked_machines):
-            # Still advance the clock so makespan/time stay consistent, then terminate.
-            self._advance_clock(float(self.time_step))
-            reward += self.failure_penalty()
-            self.last_success = False
-            self.makespan = float("inf")
-            obs = self._get_obs()
-            info = self._get_info(success=False, action_mask=obs["action_mask"])
-            info["is_gridlock"] = True
-            return obs, float(reward), True, False, info
-
+        processing_ops = self._get_processing_operations()
         self._apply_processing_work(1, processing_ops)
-
-        # Detect gridlock after the tick (e.g. newly blocked fronts).
-        processing_ops, blocked_machines = self._get_processing_operations()
-        if self._is_gridlock(processing_ops, blocked_machines):
-            reward += self.failure_penalty()
-            self.last_success = False
-            self.makespan = float("inf")
-            obs = self._get_obs()
-            info = self._get_info(success=False, action_mask=obs["action_mask"])
-            info["is_gridlock"] = True
-            return obs, float(reward), True, False, info
 
         if self.terminal():
             r, success = self.rollout()
@@ -1449,8 +1412,6 @@ class FJSPEnv(gym.Env):
         info = self._get_info(success=False, action_mask=obs["action_mask"])
         if float(np.sum(obs["action_mask"])) <= 0.0:
             info["no_valid_actions"] = True
-            if self._is_gridlock(processing_ops, blocked_machines):
-                info["is_gridlock"] = True
             return obs, float(reward + self.failure_penalty()), True, False, info
         return obs, float(reward), False, False, info
 
@@ -1473,7 +1434,7 @@ class FJSPEnv(gym.Env):
             if proc_edges.numel() == 0:
                 return 0.0, False
 
-            processing_ops, _blocked = self._get_processing_operations()
+            processing_ops = self._get_processing_operations()
             if not bool(processing_ops.any().item()):
                 return 0.0, False
             if guard >= max_ticks:

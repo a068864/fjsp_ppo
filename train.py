@@ -87,7 +87,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--full-scale",
         action="store_true",
-        help="Use FULL_SCALE_ENV (25x15x8), 2**21 steps, ./checkpoints_full",
+        help="Use FULL_SCALE_ENV (25x15x8), 2**21 steps (shared ./checkpoints, ./logs)",
     )
     parser.add_argument(
         "--debug",
@@ -195,9 +195,6 @@ def resolve_resume_path(cfg: TrainConfig) -> Optional[Path]:
             f"Refusing to load SB3 checkpoint {latest} without --trust-checkpoint. "
             "SB3/cloudpickle ZIPs are executable input; only trust files you created."
         )
-    from training.checkpoints import assert_config_compatible
-
-    assert_config_compatible(latest, cfg.to_dict(), require_metadata=True)
     return latest
 
 

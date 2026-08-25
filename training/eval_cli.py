@@ -31,7 +31,7 @@ def add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--full-scale",
         action="store_true",
-        help="Use FULL_SCALE_ENV (25x15x8), matching model, ./checkpoints_full",
+        help="Use FULL_SCALE_ENV (25x15x8), matching model under ./checkpoints",
     )
 
 

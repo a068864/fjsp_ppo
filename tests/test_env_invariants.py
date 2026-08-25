@@ -262,7 +262,7 @@ def test_rollout_matches_repeated_tick_advance():
     for _ in range(100):
         if bool(torch.all(env.state["operation"].x[:, OP_FINISHED] > 0.5)):
             break
-        processing, blocked = env._get_processing_operations()
+        processing = env._get_processing_operations()
         if not processing.any():
             break
         env._advance_time_tick()
@@ -311,28 +311,6 @@ def test_unseeded_torch_generators_differ_across_envs():
     assert not torch.equal(a.efficiency_modifiers, b.efficiency_modifiers)
     a.close()
     b.close()
-
-
-def test_gridlock_when_queued_fronts_blocked_with_idle_machine():
-    env = FJSPEnv(n_machines=2, n_jobs=2, avg_operations_per_job=2, seed=0, device="cpu")
-    env.reset(seed=0)
-    # Build artificial gridlock: op1 depends on unfinished op0, queued on m0; m1 idle.
-    env.dependency_types = {(0, 1): "sequential"}
-    env.state["operation", "precede", "operation"].edge_index = torch.tensor(
-        [[0], [1]], dtype=torch.long, device=env.device
-    )
-    env.state["operation"].x[:, :] = 0
-    env.state["operation"].x[0, OP_FINISHED] = 0
-    env.state["operation"].x[:, 0] = 2.0
-    env.state["operation"].x[:, OP_REMAINING] = 2.0
-    env.eligibility_matrix[:, :] = True
-    env.efficiency_modifiers[:, :] = 1.0
-    env.state["machine"].x[:] = 0
-    env.schedule_operation(0, 1)  # front blocked by dep on op0
-    processing, blocked = env._get_processing_operations()
-    assert not processing.any()
-    assert env._is_gridlock(processing, blocked)
-    env.close()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")

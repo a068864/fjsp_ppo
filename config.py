@@ -378,14 +378,16 @@ def get_debug_train_config() -> TrainConfig:
 
 
 def get_full_scale_train_config() -> TrainConfig:
-    """Serious-run config: 25×15×8, 2**21 steps, eval every 8 updates."""
+    """Serious-run config: 25×15×8, 2**21 steps, eval every 8 updates.
+
+    Shares ``./checkpoints`` and ``./logs`` with demo runs — the policy is
+    size-agnostic, so artifact dirs are not split by instance size.
+    """
     return TrainConfig(
         n_envs=8,
         n_eval_episodes=20,
         checkpoint_freq_updates=8,
         eval_freq_updates=8,
-        checkpoint_dir="./checkpoints_full",
-        tensorboard_log="./logs_full",
         lr_schedule="linear",
         lr_end_fraction=0.3,
         env=replace(FULL_SCALE_ENV),

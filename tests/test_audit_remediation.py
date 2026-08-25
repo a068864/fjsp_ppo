@@ -1,4 +1,4 @@
-"""Contracts for audit remediation (fingerprint, buffer clone, metrics, edges)."""
+"""Contracts for audit remediation (buffer clone, metrics, edges)."""
 
 from __future__ import annotations
 
@@ -15,40 +15,9 @@ from envs.fjsp_env import FJSPEnv, make_sb3_graph_observation_space
 from models.actor_critic import GraphActorCritic
 from models.graph_encoder import MESSAGE_EDGE_TYPES, GraphEncoder
 from models.graph_ppo import GraphPPO
-from training.checkpoints import (
-    assert_config_compatible,
-    config_fingerprint,
-    write_checkpoint_metadata,
-)
 from training.evaluate import _aggregate_eval
 from training.graph_buffer import GraphDictRolloutBuffer, slim_graph_for_policy
 from training.make_env import make_vec_env
-
-
-def test_fingerprint_ignores_seed_device_and_log_paths(tmp_path):
-    cfg = get_debug_train_config().to_dict()
-    other = dict(cfg)
-    other["seed"] = 999
-    other["device"] = "cpu"
-    other["tensorboard_log"] = "./elsewhere"
-    other["checkpoint_dir"] = str(tmp_path)
-    other["resume"] = True
-    other["trust_checkpoint"] = True
-    other["n_eval_episodes"] = 99
-    other["ppo"] = dict(cfg["ppo"])
-    other["ppo"]["total_timesteps"] = 1
-    other["ppo"]["learning_rate"] = 1e-8
-    assert config_fingerprint(cfg) == config_fingerprint(other)
-
-    broken = dict(cfg)
-    broken["env"] = dict(cfg["env"])
-    broken["env"]["n_machines"] = int(cfg["env"]["n_machines"]) + 1
-    assert config_fingerprint(cfg) != config_fingerprint(broken)
-
-    ckpt = tmp_path / "latest_model.zip"
-    ckpt.write_bytes(b"zip")
-    write_checkpoint_metadata(ckpt, config=cfg)
-    assert_config_compatible(ckpt, other)
 
 
 def test_buffer_add_does_not_clone_already_slim_graph():

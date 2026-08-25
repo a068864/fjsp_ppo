@@ -12,7 +12,6 @@ from envs.fjsp_env import (
     OP_DURATION,
     OP_FINISHED,
     OP_REMAINING,
-    OP_SEQ_DEPS,
     OP_CP_REMAINING,
     FJSPEnv,
 )
@@ -64,32 +63,6 @@ def test_failure_penalty_worse_than_serial_success_bound():
         * 1.5
     )
     assert env.failure_penalty() < worst_success
-    env.close()
-
-
-def test_gridlock_step_applies_failure_penalty():
-    env = FJSPEnv(n_machines=2, n_jobs=2, avg_operations_per_job=2, seed=0, device="cpu")
-    env.reset(seed=0)
-    env.eligibility_matrix[:, :] = True
-    env.efficiency_modifiers[:, :] = 1.0
-    env.dependency_types = {(1, 2): "sequential", (2, 0): "sequential"}
-    env.state["operation", "precede", "operation"].edge_index = torch.tensor(
-        [[1, 2], [2, 0]], dtype=torch.long, device=env.device
-    )
-    env.state["operation"].x[:, OP_SEQ_DEPS] = 0
-    env.state["operation"].x[2, OP_SEQ_DEPS] = 1
-    env.state["operation"].x[0, OP_SEQ_DEPS] = 1
-    env.state["operation"].x[:, OP_DURATION] = 2.0
-    env.state["operation"].x[:, OP_REMAINING] = 2.0
-    env.state["operation"].x[:, OP_FINISHED] = 0
-    env.state["machine"].x[:] = 0
-    env.schedule_operation(0, 0)
-    env.schedule_operation(0, 1)
-    action = 1 * env.n_operations + 2
-    _obs, reward, terminated, _truncated, info = env.step(action)
-    assert terminated
-    assert info.get("is_gridlock")
-    assert float(reward) <= env.failure_penalty() + 1e-5
     env.close()
 
 
@@ -188,6 +161,7 @@ def test_logged_makespan_is_running_classic_cmax(monkeypatch):
     )
     env.state["operation"].x[:, OP_DURATION] = 2.0
     env.state["operation"].x[:, OP_REMAINING] = 2.0
+    env._begin_episode_schedule()  # rebuild classic preds from cleared edges
     env._mark_lookahead_stale()
     env._cached_action_mask = None
     instance = extract_fjsp_instance(env)

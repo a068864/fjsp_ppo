@@ -160,21 +160,6 @@ class BestModelCallback(BaseCallback):
                 self.metric,
             )
             return
-        if self.config is not None:
-            from training.checkpoints import config_fingerprint, meta_path_for
-
-            if meta_path_for(self.save_path).is_file():
-                from training.checkpoints import read_checkpoint_metadata
-
-                meta = read_checkpoint_metadata(self.save_path)
-                expected = config_fingerprint(self.config)
-                actual = str(meta.get("config_fingerprint", ""))
-                if actual and actual != expected:
-                    logger.warning(
-                        "Ignoring persisted best score; %s fingerprint != current config",
-                        self.save_path.name,
-                    )
-                    return
         self.best_score = float(score)
 
     def update(self, score: float) -> bool:

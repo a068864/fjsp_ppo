@@ -22,18 +22,10 @@ credentials.json
 # Local inspect / vendor copies
 .sb3_inspect/
 
-# Training artifacts
-logs/**
-!logs/.gitkeep
-logs_full/**
-checkpoints/**
-!checkpoints/.gitkeep
-checkpoints_full/**
+# Other local run artifacts
 experiments/
-*.zip
-*.log
-events.out.tfevents.*
-/PPO_*/
+logs/
+checkpoints/
 
 # Local Colab helper (kept untracked)
 colab_train.ipynb
